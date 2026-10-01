@@ -1,0 +1,8 @@
+*.o
+*.elf
+*.prx
+*.map
+*.sfo
+EBOOT.PBP
+/dist/
+/shared/
