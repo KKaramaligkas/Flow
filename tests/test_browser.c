@@ -65,8 +65,8 @@ static void documents(void)
     d=parse("<script>never closes", "text/html");CHECK(strstr(d->text,"no readable text"));release(d);
     char *large=malloc(BROWSER_PAGE_MAX+1);memset(large,'x',BROWSER_PAGE_MAX);large[BROWSER_PAGE_MAX]=0;
     d=parse(large,"text/plain");CHECK(d->shortened);CHECK(strlen(d->text)<BROWSER_TEXT_MAX);CHECK(strstr(d->text,"Page shortened"));release(d);free(large);
-    char many[12000]="";
-    for(int i=0;i<140;i++)strcat(many,"<a href='next'>link</a> ");
+    char many[24000]="";
+    for(int i=0;i<280;i++)strcat(many,"<a href='next'>link</a> ");
     d=parse(many,"text/html");CHECK(d->count==BROWSER_LINKS_MAX);CHECK(d->links_omitted);release(d);
     browser_document empty;char error[256];
     CHECK(browser_document_parse(&empty,"%PDF",4,"https://a/","application/pdf",error,sizeof(error))<0);

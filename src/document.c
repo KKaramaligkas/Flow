@@ -5,7 +5,7 @@
 #include <string.h>
 #include "document.h"
 
-typedef struct { browser_document *doc; size_t used, capacity; int html, pre, latin; } writer;
+typedef struct { browser_document *doc; size_t used, capacity; int html, pre, latin; browser_style style; } writer;
 
 static int equal(const char *a, const char *b)
 {
@@ -85,6 +85,10 @@ static void emit(writer *w, uint32_t c)
     }
     char bytes[4]; size_t n = utf8(c, bytes);
     if (w->used + n >= (w->capacity ? w->capacity : BROWSER_TEXT_MAX - 64)) { w->doc->shortened = 1; return; }
+    if (w->doc->spans && (w->doc->span_count == 0 || memcmp(&w->doc->spans[w->doc->span_count-1].style, &w->style, sizeof(w->style)))) {
+        if (w->doc->span_count < CSS_SPANS_MAX) w->doc->spans[w->doc->span_count++] = (browser_span){w->used,w->style};
+        else w->doc->css_omitted=1;
+    }
     memcpy(w->doc->text + w->used, bytes, n); w->used += n; w->doc->text[w->used] = 0;
 }
 static void line(writer *w)
@@ -102,177 +106,122 @@ static void decoded(writer *w, const char *text, size_t length)
         emit(w, c); pos += n;
     }
 }
-static void attribute(const char *begin, const char *end, const char *wanted, char *out, size_t size)
+
+char *browser_decode(const char *data,size_t length,int entities,int latin)
 {
-    out[0] = 0;
-    const char *p = begin;
-    while (p < end) {
-        while (p < end && (isspace((unsigned char)*p) || *p == '/')) p++;
-        const char *name = p;
-        while (p < end && !isspace((unsigned char)*p) && *p != '=' && *p != '/') p++;
-        size_t n = (size_t)(p - name);
-        if (!n) { p++; continue; }
-        while (p < end && isspace((unsigned char)*p)) p++;
-        if (p == end || *p != '=') continue;
-        p++; while (p < end && isspace((unsigned char)*p)) p++;
-        char quote = p < end && (*p == '\'' || *p == '"') ? *p++ : 0;
-        const char *value = p;
-        while (p < end && (quote ? *p != quote : !isspace((unsigned char)*p))) p++;
-        size_t value_length = (size_t)(p - value);
-        if (quote && p < end) p++;
-        if (n != strlen(wanted)) continue;
-        int matches = 1;
-        for (size_t i = 0; i < n; i++) if (tolower((unsigned char)name[i]) != wanted[i]) matches = 0;
-        if (!matches) continue;
-        size_t used = 0;
-        for (size_t i = 0; i < value_length;) {
-            uint32_t c; size_t taken = entity(value + i, value_length - i, &c);
-            if (!taken) taken = character(value + i, value_length - i, 0, &c);
-            char bytes[4]; size_t count = utf8(c, bytes);
-            if (c < 32 || c == 127 || used + count >= size) { out[0] = 0; return; }
-            memcpy(out + used, bytes, count); used += count; i += taken;
-        }
-        out[used] = 0; return;
-    }
+    if(length>DOM_SOURCE_MAX||length>(SIZE_MAX-1)/3)return NULL;
+    char *out=malloc(length*3+1);if(!out)return NULL;size_t used=0;
+    for(size_t pos=0;pos<length;){uint32_t c;size_t n=entities?entity(data+pos,length-pos,&c):0;
+        if(!n)n=character(data+pos,length-pos,latin,&c);
+        char bytes[4];size_t count=utf8(c,bytes);memcpy(out+used,bytes,count);used+=count;pos+=n;
+    }out[used]=0;return out;
 }
-static int block(const char *tag)
+static void title_text(const browser_dom *dom,int index,char *out,size_t capacity)
 {
-    static const char *tags[] = {"p","div","article","section","header","footer","main","nav","aside","h1","h2","h3","h4","h5","h6","li","ul","ol","tr","table","blockquote","pre","hr","br"};
-    for (size_t i = 0; i < sizeof(tags)/sizeof(*tags); i++) if (equal(tag,tags[i])) return 1;
+    const dom_node *node=&dom->nodes[index];size_t used=strlen(out);
+    if(node->text&&used<capacity-1){size_t n=strlen(node->text);if(n>capacity-used-1)n=capacity-used-1;
+        while(n&&((unsigned char)node->text[n]&0xc0)==0x80)n--;
+        memcpy(out+used,node->text,n);out[used+n]=0;
+    }
+    for(int i=node->first;i>=0;i=dom->nodes[i].next)title_text(dom,i,out,capacity);
+}
+static void marker(writer *w,int number){char value[24];snprintf(value,sizeof(value)," [%d]",number);decoded(w,value,strlen(value));}
+static void render_node(writer *w,int index,browser_style parent,const char *base,int depth)
+{
+    browser_document *doc=w->doc;const browser_dom *dom=doc->dom;const dom_node *n=&dom->nodes[index];
+    if(depth>=DOM_DEPTH_MAX)return;
+    browser_style style=css_compute(&doc->css,dom,index,parent);
+    if(style.hidden||equal(n->tag,"head")||equal(n->tag,"script")||equal(n->tag,"style")||equal(n->tag,"template")||equal(n->tag,"title")||equal(n->tag,"link"))return;
+    if(equal(n->tag,"body")&&style.background)doc->paper=style.background;
+    w->style=style;w->pre=style.pre;
+    if(style.block)line(w);
+    const char *id=dom_attr(n,"id");if(!*id&&equal(n->tag,"a"))id=dom_attr(n,"name");
+    if(*id&&strlen(id)<sizeof(doc->anchors[0].id)&&doc->anchor_count<BROWSER_ANCHORS_MAX){browser_anchor *a=&doc->anchors[doc->anchor_count++];strcpy(a->id,id);a->offset=w->used;}
+    int active=-1;
+    if(equal(n->tag,"a")) {
+        char target[BROWSER_URL_MAX];const char *href=dom_attr(n,"href");
+        if(*href&&browser_url_resolve(base,href,target,sizeof(target))==0){
+            if(doc->count==BROWSER_LINKS_MAX)doc->links_omitted=1;
+            else{active=doc->count++;browser_link *l=&doc->links[active];strcpy(l->url,target);l->offset=w->used;l->node=n->source_id;}
+        }
+    }
+    if(equal(n->tag,"li")){emit(w,'*');emit(w,' ');}
+    if(equal(n->tag,"td")||equal(n->tag,"th"))emit(w,' ');
+    if(equal(n->tag,"img")){const char *alt=dom_attr(n,"alt");for(size_t p=0,len=strlen(alt);p<len;){uint32_t c;size_t n=character(alt+p,len-p,0,&c);emit(w,c);p+=n;}}
+    if(n->text&&strcmp(n->tag,"#text")==0){
+        for(size_t pos=0,length=strlen(n->text);pos<length&&!doc->shortened;){uint32_t c;size_t count=character(n->text+pos,length-pos,0,&c);emit(w,c);pos+=count;}
+    }
+    for(int i=n->first;i>=0&&!doc->shortened;i=dom->nodes[i].next)render_node(w,i,style,base,depth+1);
+    w->style=style;w->pre=style.pre;
+    if(active>=0){browser_link *l=&doc->links[active];size_t length=w->used-l->offset;if(length>=sizeof(l->label))length=sizeof(l->label)-1;
+        while(length&&((unsigned char)doc->text[l->offset+length]&0xc0)==0x80)length--;
+        memcpy(l->label,doc->text+l->offset,length);l->label[length]=0;
+        for(char *p=l->label;*p;p++)if(*p=='\n')*p=' ';
+        if(!length)snprintf(l->label,sizeof(l->label),"Link %d",active+1);marker(w,active+1);
+    }
+    if(style.block)line(w);
+}
+int browser_document_render(browser_document *doc,char *err,size_t errlen)
+{
+    char *text=calloc(1,BROWSER_TEXT_MAX);browser_span *spans=calloc(CSS_SPANS_MAX,sizeof(*spans));
+    if(!text||!spans){free(text);free(spans);snprintf(err,errlen,"Not enough memory to display the page.");return -1;}
+    free(doc->text);free(doc->spans);css_free(&doc->css);doc->text=text;doc->spans=spans;
+    doc->count=doc->anchor_count=doc->span_count=doc->links_omitted=doc->css_omitted=0;
+    int previously_shortened=doc->dom->shortened;doc->shortened=0;
+    doc->paper=0xff1f140c;snprintf(doc->title,sizeof(doc->title),"Web page");
+    char base[BROWSER_URL_MAX];strcpy(base,doc->url);int base_set=0;
+    for(int i=0;i<doc->dom->count;i++){
+        const dom_node *n=&doc->dom->nodes[i];
+        if(equal(n->tag,"title")){doc->title[0]=0;title_text(doc->dom,i,doc->title,sizeof(doc->title));}
+        if(equal(n->tag,"base")&&!base_set){char resolved[BROWSER_URL_MAX];if(*dom_attr(n,"href")&&browser_url_resolve(base,dom_attr(n,"href"),resolved,sizeof(resolved))==0){strcpy(base,resolved);base_set=1;}}
+        if((equal(n->tag,"style")||equal(n->tag,"link")&&equal(dom_attr(n,"rel"),"stylesheet"))&&n->text)css_add(&doc->css,n->text,strlen(n->text));
+    }
+    browser_style initial={.color=0xfff2e8e0,.scale=0.64f,.pre=!doc->dom->html};
+    writer w={.doc=doc,.html=doc->dom->html,.style=initial,.pre=initial.pre};
+    render_node(&w,0,initial,base,0);
+    doc->shortened|=previously_shortened;doc->css_omitted|=doc->css.omitted;
+    if(doc->shortened){const char *notice="\n[Page shortened to fit PSP memory.]\n";memcpy(doc->text+w.used,notice,strlen(notice)+1);}
+    if(!*doc->text)strcpy(doc->text,"This page has no readable text. Try enabling JavaScript or downloading the file.");
     return 0;
 }
-static void close_link(writer *w, int *active)
+browser_style browser_style_at(const browser_document *doc,size_t offset)
 {
-    if (*active < 0) return;
-    browser_link *link = &w->doc->links[*active];
-    size_t length = w->used - link->offset;
-    if (length >= sizeof(link->label)) length = sizeof(link->label) - 1;
-    /* Never cut the middle of a UTF-8 code point. */
-    while (length && ((unsigned char)w->doc->text[link->offset + length] & 0xc0) == 0x80) length--;
-    memcpy(link->label, w->doc->text + link->offset, length); link->label[length] = 0;
-    for (char *p = link->label; *p; p++) if (*p == '\n') *p = ' ';
-    if (!length) snprintf(link->label, sizeof(link->label), "Link %d", *active + 1);
-    char marker[16]; snprintf(marker, sizeof(marker), " [%d]", *active + 1);
-    for (const char *p = marker; *p; p++) emit(w, (unsigned char)*p);
-    *active = -1;
+    browser_style style={.color=0xfff2e8e0,.scale=0.64f};
+    int low=0,high=doc->span_count;while(low<high){int mid=low+(high-low)/2;if(doc->spans[mid].offset<=offset)low=mid+1;else high=mid;}
+    if(low)style=doc->spans[low-1].style;
+    return style;
 }
-
-void browser_document_free(browser_document *doc) { free(doc->text); memset(doc, 0, sizeof(*doc)); }
-
-int browser_document_parse(browser_document *doc, const char *data, size_t length,
-                           const char *url, const char *content_type, char *err, size_t errlen)
+void browser_script_free(browser_document *);
+void browser_document_free(browser_document *doc)
 {
-    memset(doc, 0, sizeof(*doc));
-    if (!data || length > BROWSER_PAGE_MAX || memchr(data, 0, length) ||
-        browser_url_resolve(NULL, url, doc->url, sizeof(doc->url)) < 0) {
-        snprintf(err, errlen, "Invalid or oversized page."); return -1;
-    }
-    if (!content_type) content_type = "";
-    int html = starts(content_type, "text/html") || starts(content_type, "application/xhtml+xml");
-    if (!*content_type) {
-        size_t i = 0; while (i < length && isspace((unsigned char)data[i])) i++;
-        html = i < length && data[i] == '<';
-    } else if (!html && !starts(content_type, "text/") && !starts(content_type, "application/json")) {
-        snprintf(err, errlen, "This is a file. Select Download to save it."); return -1;
-    }
-    for (size_t i = 0; i < length; i++) if ((unsigned char)data[i] < 9 || ((unsigned char)data[i] > 13 && (unsigned char)data[i] < 32)) {
-        snprintf(err, errlen, "Binary content. Select Download to save it."); return -1;
-    }
-    doc->text = calloc(1, BROWSER_TEXT_MAX);
-    if (!doc->text) { snprintf(err, errlen, "Not enough memory for the page."); return -1; }
-    writer w = {.doc = doc, .html = html};
-    w.latin = find_case(content_type, "iso-8859-1") || find_case(content_type, "windows-1252");
-    snprintf(doc->title, sizeof(doc->title), "Web page");
-    if (!html) {
-        /* Plain text keeps its layout and does not interpret HTML entities. */
-        for (size_t i = 0; i < length && !doc->shortened;) { uint32_t c; size_t n = character(data+i,length-i,w.latin,&c); emit(&w,c); i += n; }
-        goto done;
-    }
-    char base[BROWSER_URL_MAX]; strcpy(base, doc->url);
-    int active = -1, head = 0, title = 0, base_set = 0;
-    char suppressed[32] = "";
-    for (size_t pos = 0; pos < length && !doc->shortened;) {
-        if (suppressed[0]) {
-            char closing_tag[40]; snprintf(closing_tag,sizeof(closing_tag),"</%s",suppressed);
-            size_t tag_length = strlen(closing_tag), candidate = pos;
-            while (candidate + tag_length < length) {
-                if (data[candidate] == '<') {
-                    int match = 1;
-                    for (size_t i=0; i<tag_length; i++) if (tolower((unsigned char)data[candidate+i]) != closing_tag[i]) match=0;
-                    char after = data[candidate+tag_length];
-                    if (match && (after=='>' || after=='/' || isspace((unsigned char)after))) break;
-                }
-                candidate++;
-            }
-            if (candidate + tag_length >= length) break;
-            pos = candidate;
-        }
-        if (data[pos] != '<') {
-            size_t end = pos; while (end < length && data[end] != '<') end++;
-            if (!suppressed[0] && !head && !title) decoded(&w, data + pos, end - pos);
-            if (title && !suppressed[0]) {
-                browser_document temporary = {0}; char title_text[512];
-                temporary.text = title_text; title_text[0] = 0;
-                writer tw = {.doc=&temporary,.html=1,.latin=w.latin,.capacity=sizeof(title_text)}; decoded(&tw,data+pos,end-pos);
-                size_t keep = strlen(title_text);
-                if (keep >= sizeof(doc->title)) keep = sizeof(doc->title) - 1;
-                while (keep && ((unsigned char)title_text[keep] & 0xc0) == 0x80) keep--;
-                memcpy(doc->title,title_text,keep); doc->title[keep]=0;
-            }
-            pos = end; continue;
-        }
-        if (pos + 4 <= length && !memcmp(data + pos, "<!--", 4)) {
-            size_t end = pos + 4;
-            while (end + 3 <= length && memcmp(data + end, "-->", 3)) end++;
-            pos = end + 3 <= length ? end + 3 : length; continue;
-        }
-        size_t end = pos + 1; char quote = 0;
-        for (; end < length; end++) {
-            char c = data[end];
-            if (quote) { if (c == quote) quote = 0; }
-            else if (c == '\'' || c == '"') quote = c;
-            else if (c == '>') break;
-        }
-        if (end == length) { if (!suppressed[0] && !head) decoded(&w,data+pos,length-pos); break; }
-        const char *p = data + pos + 1, *limit = data + end;
-        while (p < limit && isspace((unsigned char)*p)) p++;
-        int closing = p < limit && *p == '/'; if (closing) p++;
-        char tag[32]; size_t n = 0;
-        while (p < limit && (isalnum((unsigned char)*p) || *p == '-')) { if (n + 1 < sizeof(tag)) tag[n++] = (char)tolower((unsigned char)*p); p++; }
-        tag[n] = 0;
-        pos = end + 1;
-        if (suppressed[0]) { if (closing && equal(tag,suppressed)) suppressed[0]=0; continue; }
-        if (!closing && (equal(tag,"script") || equal(tag,"style") || equal(tag,"template"))) { strcpy(suppressed,tag); continue; }
-        if (equal(tag,"head")) { head = !closing; continue; }
-        if (equal(tag,"title")) { title = !closing; continue; }
-        if (!closing && equal(tag,"body")) head = title = 0;
-        if (!closing && equal(tag,"base") && !base_set) {
-            char href[BROWSER_URL_MAX], resolved[BROWSER_URL_MAX]; attribute(p,limit,"href",href,sizeof(href));
-            if (*href && browser_url_resolve(base,href,resolved,sizeof(resolved)) == 0) { strcpy(base,resolved); base_set=1; }
-        }
-        if (head || title) continue;
-        if (block(tag)) line(&w);
-        if (equal(tag,"pre")) w.pre = !closing;
-        if (equal(tag,"td") || equal(tag,"th")) emit(&w,' ');
-        if (equal(tag,"a")) {
-            close_link(&w,&active);
-            if (!closing) {
-                char href[BROWSER_URL_MAX], resolved[BROWSER_URL_MAX]; attribute(p,limit,"href",href,sizeof(href));
-                if (*href && browser_url_resolve(base,href,resolved,sizeof(resolved)) == 0) {
-                    if (doc->count == BROWSER_LINKS_MAX) doc->links_omitted=1;
-                    else { active=doc->count++; strcpy(doc->links[active].url,resolved); doc->links[active].offset=w.used; }
-                }
-            }
-        }
-        if (!closing && equal(tag,"img")) { char alt[256]; attribute(p,limit,"alt",alt,sizeof(alt)); if (*alt) decoded(&w,alt,strlen(alt)); }
-        if (!closing && equal(tag,"li")) { emit(&w,'*'); emit(&w,' '); }
-    }
-    close_link(&w,&active);
-done:
-    if (doc->shortened) {
-        const char *notice = "\n[Page shortened to fit PSP memory.]\n";
-        size_t n = strlen(notice); memcpy(doc->text+w.used,notice,n+1);
-    }
-    if (!*doc->text) strcpy(doc->text,"This page has no readable text. JavaScript and forms are not supported.");
-    return 0;
+    browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);
+    if(doc->dom){dom_free(doc->dom);free(doc->dom);}memset(doc,0,sizeof(*doc));
+}
+int browser_document_read(browser_document *doc,dom_read_fn read,void *ud,const char *url,const char *type,
+                          dom_cancel_fn cancel,void *cancel_ud,char *err,size_t errlen)
+{
+    memset(doc,0,sizeof(*doc));
+    if(!type)type="";
+    int html=starts(type,"text/html")||starts(type,"application/xhtml+xml")||!*type;
+    if(browser_url_resolve(NULL,url,doc->url,sizeof(doc->url))<0||!html&&!starts(type,"text/")&&!starts(type,"application/json")){snprintf(err,errlen,"This is a file. Select Download to save it.");return -1;}
+    doc->dom=calloc(1,sizeof(*doc->dom));if(!doc->dom){snprintf(err,errlen,"Not enough memory for the page.");return -1;}
+    int latin=find_case(type,"iso-8859-1")||find_case(type,"windows-1252");
+    if(dom_parse(doc->dom,read,ud,html,latin,cancel,cancel_ud,err,errlen)<0){browser_document_free(doc);return -1;}
+    doc->source_bytes=doc->dom->source_bytes;
+    int result=browser_document_render(doc,err,errlen);
+    if(result<0)browser_document_free(doc);
+    return result;
+}
+typedef struct{const char *data;size_t length,pos;} memory_reader;
+static int memory_read(void *ud,char *out,size_t size)
+{
+    memory_reader *r=ud;size_t n=r->length-r->pos;if(n>size)n=size;memcpy(out,r->data+r->pos,n);r->pos+=n;return (int)n;
+}
+int browser_document_parse(browser_document *doc,const char *data,size_t length,const char *url,const char *type,char *err,size_t errlen)
+{
+    memset(doc,0,sizeof(*doc));
+    if(!data||length>BROWSER_PAGE_MAX||memchr(data,0,length)){snprintf(err,errlen,"Invalid or oversized page.");return -1;}
+    memory_reader r={data,length,0};
+    if(!type||!*type){size_t i=0;while(i<length&&isspace((unsigned char)data[i]))i++;type=i<length&&data[i]=='<'?"text/html":"text/plain";}
+    return browser_document_read(doc,memory_read,&r,url,type,NULL,NULL,err,errlen);
 }

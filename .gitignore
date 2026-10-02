@@ -6,3 +6,6 @@
 EBOOT.PBP
 /dist/
 /shared/
+
+/src/dom_bootstrap.h
+/tests/test_engine

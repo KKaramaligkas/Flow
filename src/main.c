@@ -1,4 +1,4 @@
-/* ARK Browser 0.1: direct HTTP(S), text pages and links, bounded PSP memory. */
+/* ARK Browser: direct HTTP(S), styled reader and on-device JavaScript. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +6,8 @@
 #include <psppower.h>
 #include <psputility.h>
 #include "document.h"
+#include "layout.h"
+#include "version.h"
 #include "session.h"
 #include "jobs.h"
 #include "entropy.h"
@@ -16,12 +18,11 @@
 #include "text.h"
 #include "util.h"
 
-PSP_MODULE_INFO("ARKBrowser",PSP_MODULE_USER,0,1);
+PSP_MODULE_INFO("ARKBrowser",PSP_MODULE_USER,0,2);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER|PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_THRESHOLD_SIZE_KB(4*1024);
-#define APP_VERSION "0.1.0"
 #define PAGE_LINES 16
-#define MAX_LINES BROWSER_TEXT_MAX
+#define MAX_LINES BROWSER_LINES_MAX
 #define BG RGB(12,20,31)
 #define FG RGB(224,232,242)
 #define DIM RGB(135,158,180)
@@ -31,10 +32,11 @@ PSP_HEAP_THRESHOLD_SIZE_KB(4*1024);
 static volatile int exit_requested;
 static browser_document *page;
 static browser_history history;
-static const char *line_starts[MAX_LINES];
-static int line_lengths[MAX_LINES], line_count, scroll, selected=-1, link_list, menu, menu_selection;
+static browser_line page_lines[MAX_LINES];
+static int javascript=1;
+static int line_count, scroll, selected=-1, link_list, menu, menu_selection;
 static char app_dir[192], downloads[224], message[256], failed_url[BROWSER_URL_MAX];
-static const char *menu_labels[]={"Open address","Back","Reload","Download selected link / page","Connect Wi-Fi","Start page","Exit"};
+static const char *menu_labels[]={"Open address","Back","Reload","Download selected link / page","Connect Wi-Fi","Start page","JavaScript: on/off","Exit"};
 
 static int exit_callback(int a,int b,void *ud)
 {
@@ -49,14 +51,39 @@ static int callbacks(SceSize args,void *argp)
 static void notice(const char *text) { pm_strlcpy(message,text,sizeof(message)); }
 static void clamp_scroll(void)
 {
-    int last=line_count>PAGE_LINES?line_count-PAGE_LINES:0;
+    int last=line_count;float height=0;
+    while(last>0&&height+page_lines[last-1].height<=177){last--;height+=page_lines[last].height;}
+    if(last==line_count&&last>0)last--;
     if(scroll<0) scroll=0;
     if(scroll>last) scroll=last;
 }
+static float measure(void *ud,const char *text,size_t length,browser_style style)
+{
+    (void)ud; char utf8[8];if(length>=sizeof(utf8))return 0;
+    memcpy(utf8,text,length);utf8[length]=0;
+    return text_width(utf8,style.scale,(style.flags&CSS_BOLD)?TEXT_BOLD:0);
+}
 static void layout(void)
 {
-    line_count=page?text_wrap(page->text,0.64f,452,0,line_starts,line_lengths,MAX_LINES):0;
+    line_count=page?browser_layout(page,page_lines,MAX_LINES,452,measure,NULL):0;
     clamp_scroll();
+}
+static void draw_line(int index,float y)
+{
+    const browser_line *line=&page_lines[index];size_t end=line->start+line->length,pos=line->start;
+    float x=12+(line->align==1?(452-line->width)/2:line->align==2?452-line->width:0);
+    while(pos<end) {
+        browser_style style=browser_style_at(page,pos);size_t stop=end;
+        for(int i=0;i<page->span_count;i++)if(page->spans[i].offset>pos){if(page->spans[i].offset<stop)stop=page->spans[i].offset;break;}
+        if(stop-pos>255){stop=pos+255;while(stop>pos&&((unsigned char)page->text[stop]&0xc0)==0x80)stop--;}
+        char run[256];memcpy(run,page->text+pos,stop-pos);run[stop-pos]=0;
+        int flags=(style.flags&CSS_BOLD)?TEXT_BOLD:0;float width=text_width(run,style.scale,flags);
+        int mark=selected>=0&&page->links[selected].offset>=pos&&page->links[selected].offset<stop;
+        if(style.background)gfx_rect((int)x,(int)y,(int)(width+1),(int)line->height,style.background);
+        text_draw(x,y,run,style.scale,mark?ACCENT:style.color,flags);
+        if(style.flags&CSS_UNDERLINE)gfx_rect((int)x,(int)(y+text_line_height(style.scale)-1),(int)width,1,style.color);
+        x+=width;pos=stop;
+    }
 }
 static void draw_scene(void *ud)
 {
@@ -77,12 +104,9 @@ static void draw_scene(void *ud)
             text_draw_fit(12,49+i*13,450,label,0.6f,index==selected?ACCENT:FG,0);
         }
     } else {
-        for(int i=0;i<PAGE_LINES && scroll+i<line_count;i++) {
-            const char *start=line_starts[scroll+i]; size_t offset=(size_t)(start-page->text);
-            int mark=selected>=0 && page->links[selected].offset>=offset &&
-                page->links[selected].offset<offset+(size_t)line_lengths[scroll+i];
-            text_draw_n(12,48+i*11,start,line_lengths[scroll+i],0.64f,mark?ACCENT:FG,0);
-        }
+        gfx_rect(8,47,464,177,page->paper);
+        float y=48;
+        for(int i=scroll;i<line_count&&y<222;i++) {draw_line(i,y);y+=page_lines[i].height;}
     }
     gfx_noclip();
     gfx_rect(0,226,480,46,RGB(18,32,47));
@@ -101,9 +125,9 @@ static void draw_scene(void *ud)
     if(menu) {
         gfx_rect(75,47,330,173,RGB(28,46,61));
         text_draw(90,53,"Browser menu",0.65f,FG,TEXT_BOLD);
-        for(int i=0;i<7;i++) {
-            if(menu_selection==i) gfx_rect(83,77+i*19,314,19,RGB(36,80,99));
-            text_draw(90,79+i*19,menu_labels[i],0.55f,menu_selection==i?ACCENT:FG,0);
+        for(int i=0;i<8;i++) {
+            if(menu_selection==i) gfx_rect(83,73+i*17,314,19,RGB(36,80,99));
+            text_draw(90,75+i*17,menu_labels[i],0.55f,menu_selection==i?ACCENT:FG,0);
         }
     }
     if(browser_jobs_busy()) {
@@ -175,10 +199,14 @@ static void navigate(const char *url,int mode)
 {
     char target[BROWSER_URL_MAX];
     if(browser_url_resolve(NULL,url,target,sizeof(target))<0) { notice("Unsupported or invalid link."); return; }
+    const char *fragment=strchr(target,'#');
+    if(page&&fragment){char current[BROWSER_URL_MAX],next[BROWSER_URL_MAX];strcpy(current,page->url);strcpy(next,target);current[strcspn(current,"#")]=0;next[strcspn(next,"#")]=0;
+        if(!strcmp(current,next)){size_t offset=0;for(int i=0;i<page->anchor_count;i++)if(!strcmp(page->anchors[i].id,fragment+1))offset=page->anchors[i].offset;
+            for(int i=0;i<line_count;i++)if(page_lines[i].start+page_lines[i].length>=offset){scroll=i;break;}clamp_scroll();return;}}
     if(!connect_wifi() || exit_requested) return;
     message[0]=0; failed_url[0]=0;
     if(history.count) history.visits[history.current].scroll=scroll;
-    if(browser_jobs_submit(BROWSER_JOB_PAGE,mode,target,NULL)<0) notice("Could not start loading the page.");
+    if(browser_jobs_submit(BROWSER_JOB_PAGE,mode,target,NULL,javascript)<0) notice("Could not start loading the page.");
 }
 static void open_address(void)
 {
@@ -200,15 +228,15 @@ static void download_file(void)
     }
     if(index==100) { notice("Too many files with that name. Rename or remove an old download."); return; }
     message[0]=0;
-    if(browser_jobs_submit(BROWSER_JOB_DOWNLOAD,NAV_NEW,url,destination)<0) notice("Could not start the download.");
+    if(browser_jobs_submit(BROWSER_JOB_DOWNLOAD,NAV_NEW,url,destination,0)<0) notice("Could not start the download.");
 }
 static void home(void)
 {
-    const char *html="<title>ARK Browser 0.1</title><h1>ARK Browser</h1><p>Direct HTTPS with TLS 1.2 and certificate checks.</p>"
+    const char *html="<title>ARK Browser 0.2</title><h1>ARK Browser</h1><p>Direct HTTPS with TLS 1.2 and certificate checks.</p>"
         "<p>Press Triangle to enter a web address. Up/Down scroll; L/R select a numbered link; Confirm opens it.</p>"
         "<p>Try <a href='https://example.org/'>Example.org</a> or <a href='http://info.cern.ch/'>the first website (HTTP)</a>.</p>"
         "<p>Select opens the link list. Square saves a selected link. Start opens the menu.</p>"
-        "<p>This is a text browser. JavaScript, forms, CSS, images and video are not supported.</p>";
+        "<p>Modern JavaScript runs on your PSP. Basic CSS styles text. Images, video and interactive forms are unavailable. Start toggles JavaScript.</p>";
     browser_document *next=calloc(1,sizeof(*next)); char err[256];
     if(!next) { notice("Not enough memory for the start page."); return; }
     if(browser_document_parse(next,html,strlen(html),"https://example.org/","text/html",err,sizeof(err))<0) { free(next); notice(err); return; }
@@ -225,7 +253,9 @@ static void collect(void)
             browser_document_free(page); free(page); page=loaded; browser_work.page=NULL;
             scroll=history.visits[history.current].scroll; selected=-1; link_list=0; failed_url[0]=0; layout();
             if(page->shortened) notice("Page shortened to fit PSP memory.");
-            else if(page->links_omitted) notice("Only the first 128 links are available.");
+            else if(page->scripts_failed) notice("Some scripts failed or exceeded PSP limits. Showing available text.");
+            else if(page->assets_omitted||page->css_omitted) notice("Some page assets or CSS exceeded PSP limits.");
+            else if(page->links_omitted) notice("Only the first 256 links are available.");
         } else notice("Could not update browsing history.");
     } else if(browser_work.result==0) {
         char saved[256]; snprintf(saved,sizeof(saved),"Saved: %s",browser_work.destination); notice(saved);
@@ -246,7 +276,7 @@ static void select_link(int direction)
     failed_url[0]=0;
     if(!link_list) {
         for(int i=0;i<line_count;i++) {
-            size_t end=(size_t)(line_starts[i]-page->text)+(size_t)line_lengths[i];
+            size_t end=page_lines[i].start+page_lines[i].length;
             if(page->links[selected].offset<=end) { scroll=i; clamp_scroll(); break; }
         }
     }
@@ -265,7 +295,8 @@ static void menu_action(int choice)
     else if(choice==3) download_file();
     else if(choice==4) { net_disconnect(); connect_wifi(); }
     else if(choice==5) home();
-    else if(choice==6) exit_requested=1;
+    else if(choice==6) { javascript=!javascript; notice(javascript?"JavaScript enabled. Reload the page to apply.":"JavaScript disabled. Reload the page to apply."); }
+    else if(choice==7) exit_requested=1;
 }
 int main(int argc,char **argv)
 {
@@ -280,8 +311,10 @@ int main(int argc,char **argv)
     snprintf(downloads,sizeof(downloads),"%sdownloads/",app_dir);
     char ca[256]; snprintf(ca,sizeof(ca),"%scacert.pem",app_dir);
     net_set_tls(ca,1); net_set_client("ARKBrowser/" APP_VERSION " (PSP; text browser)",1);
+    char cache_dir[256],cache[256];snprintf(cache_dir,sizeof(cache_dir),"%s.cache/",app_dir);
+    int cache_ok=fs_mkdirs(cache_dir,NULL,NULL);snprintf(cache,sizeof(cache),"%s.cache/page.tmp",app_dir);
     home();
-    if(!page || browser_jobs_start()<0) {
+    if(!page || cache_ok<0 || browser_jobs_start(cache)<0) {
         if(page) { notice("Could not start the browser worker. Press Cancel to exit."); input_state in; do { input_update(&in); frame(); } while(!exit_requested && !(in.pressed&BTN_CANCEL)); }
     } else {
         input_state in;
@@ -289,8 +322,8 @@ int main(int argc,char **argv)
             collect(); input_update(&in);
             if(browser_jobs_busy()) { if(in.pressed&BTN_CANCEL) browser_work.cancel=1; }
             else if(menu) {
-                if(in.repeat&PSP_CTRL_DOWN) menu_selection=(menu_selection+1)%7;
-                if(in.repeat&PSP_CTRL_UP) menu_selection=(menu_selection+6)%7;
+                if(in.repeat&PSP_CTRL_DOWN) menu_selection=(menu_selection+1)%8;
+                if(in.repeat&PSP_CTRL_UP) menu_selection=(menu_selection+7)%8;
                 if(in.pressed&BTN_CANCEL) menu=0;
                 if(in.pressed&BTN_CONFIRM) menu_action(menu_selection);
             } else {
