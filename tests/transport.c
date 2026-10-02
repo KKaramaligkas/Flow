@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <curl/curl.h>
 #include "../../PluginManager/src/http_policy.h"
+#include "../../PluginManager/src/transfer.h"
 static size_t discard(char *data,size_t size,size_t count,void *ud)
 {
     (void)data;(void)ud;return size*count;
@@ -24,7 +25,7 @@ int main(int argc,char **argv)
         curl_easy_setopt(curl,CURLOPT_SSLVERSION,(long)(CURL_SSLVERSION_TLSv1_0|CURL_SSLVERSION_MAX_TLSv1_0));
         curl_easy_setopt(curl,CURLOPT_SSL_CIPHER_LIST,"ALL:@SECLEVEL=0");
     }
-    result=curl_easy_perform(curl);
+    result=pm_transfer_run(curl,NULL,NULL);
     char *effective=NULL;curl_easy_getinfo(curl,CURLINFO_EFFECTIVE_URL,&effective);
     if(effective)printf("%s\n",effective);
     curl_easy_cleanup(curl);curl_global_cleanup();

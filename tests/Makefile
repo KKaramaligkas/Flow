@@ -7,7 +7,7 @@ check: test_browser transport
 	python3 test_transport.py
 test_browser: test_browser.c $(CORE)
 	$(CC) $(CFLAGS) -o $@ $^
-transport: transport.c ../../PluginManager/src/http_policy.c
+transport: transport.c ../../PluginManager/src/http_policy.c ../../PluginManager/src/transfer.c
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl
 clean:
 	rm -f test_browser transport

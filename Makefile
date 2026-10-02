@@ -1,6 +1,6 @@
 TARGET = arkbrowser
 OBJS = src/main.o src/jobs.o src/url.o src/document.o src/session.o \
-       shared/net.o shared/http_policy.o shared/tlsdiag.o shared/clock.o shared/entropy.o \
+       shared/net.o shared/http_policy.o shared/transfer.o shared/tlsdiag.o shared/clock.o shared/entropy.o \
        shared/stubs.o shared/resume.o shared/fs.o shared/util.o shared/gfx.o shared/text.o shared/input.o
 INCDIR = src ../PluginManager/src
 CFLAGS = -O2 -G0 -Wall -Wextra -Wno-unused-parameter -std=gnu99 $(EXTRA_CFLAGS)
