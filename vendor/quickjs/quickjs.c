@@ -31,6 +31,9 @@
 #include <sys/time.h>
 #include <time.h>
 #include <fenv.h>
+#ifdef __PSP__
+#include <psputility.h>
+#endif
 #include <math.h>
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
@@ -7458,7 +7461,8 @@ static int find_line_num(JSContext *ctx, JSFunctionBytecode *b,
                          uint32_t pc_value, int *pcol_num)
 {
     const uint8_t *p_end, *p;
-    int new_line_num, line_num, pc, v, ret, new_col_num, col_num;
+    int new_line_num, line_num, pc, ret, new_col_num, col_num;
+    int32_t v;
     uint32_t val;
     unsigned int op;
 
@@ -45304,7 +45308,8 @@ static JSValue js_parseInt(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     const char *str, *p;
-    int radix, flags;
+    int flags;
+    int32_t radix;
     JSValue ret;
 
     str = JS_ToCString(ctx, argv[0]);
@@ -47718,6 +47723,13 @@ static int getTimezoneOffset(int64_t time)
         loc_ti = mktime(tm);
 
         res = (gm_ti - loc_ti) / 60;
+    }
+#elif defined(__PSP__)
+    {
+        int zone = 0, daylight = 0;
+        sceUtilityGetSystemParamInt(PSP_SYSTEMPARAM_ID_INT_TIMEZONE, &zone);
+        sceUtilityGetSystemParamInt(PSP_SYSTEMPARAM_ID_INT_DAYLIGHTSAVINGS, &daylight);
+        res = -zone - (daylight ? 60 : 0);
     }
 #else
     {
@@ -54122,7 +54134,7 @@ static __exception int remainingElementsCount_add(JSContext *ctx,
                                                   int addend)
 {
     JSValue val;
-    int remainingElementsCount;
+    int32_t remainingElementsCount;
 
     val = JS_GetPropertyUint32(ctx, resolve_element_env, 0);
     if (JS_IsException(val))
@@ -54153,7 +54165,8 @@ static JSValue js_promise_all_resolve_element(JSContext *ctx,
     JSValueConst resolve = func_data[3];
     JSValueConst resolve_element_env = func_data[4];
     JSValue ret, obj;
-    int is_zero, index;
+    int is_zero;
+    int32_t index;
 
     if (JS_ToInt32(ctx, &index, func_data[1]))
         return JS_EXCEPTION;

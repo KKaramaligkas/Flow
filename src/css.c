@@ -41,7 +41,8 @@ static int parse_rules(browser_css *css,const char *text,size_t length,int nesti
     while(pos<length){while(pos<length&&isspace((unsigned char)text[pos]))pos++;
         if(pos+1<length&&text[pos]=='/'&&text[pos+1]=='*'){pos+=2;while(pos+1<length&&(text[pos]!='*'||text[pos+1]!='/'))pos++;pos+=2;continue;}
         size_t begin=pos;while(pos<length&&text[pos]!='{'&&text[pos]!=';')pos++;
-        if(pos==length)break;if(text[pos]==';'){pos++;continue;}
+        if(pos==length)break;
+        if(text[pos]==';'){pos++;continue;}
         size_t selector_length=pos-begin;pos++;size_t body=pos;int depth=1;char quote=0;
         while(pos<length&&depth){char c=text[pos];if(quote){if(c==quote&&(!pos||text[pos-1]!='\\'))quote=0;}else if(c=='\''||c=='"')quote=c;else if(c=='{')depth++;else if(c=='}')depth--;if(depth)pos++;}
         size_t body_length=pos-body;if(pos<length)pos++;
@@ -56,7 +57,8 @@ static int parse_rules(browser_css *css,const char *text,size_t length,int nesti
             if(css->count==CSS_RULES_MAX){css->omitted=1;break;}
             css_rule *r=&css->rules[css->count];snprintf(r->selector,sizeof(r->selector),"%s",selector);memcpy(r->declarations,text+body,body_length);r->declarations[body_length]=0;r->order=css->count++;
             for(const char *q=selector;*q;q++)if(*q=='#')r->specificity+=100;else if(*q=='.'||*q==':')r->specificity+=10;else if(isalpha((unsigned char)*q)&&(q==selector||q[-1]==' '||q[-1]=='>'))r->specificity++;
-            if(!next)break;p=next;
+            if(!next)break;
+            p=next;
         }
     }return 0;
 }
@@ -72,11 +74,13 @@ static int color(const char *v,uint32_t *out)
     if(*v=='#'&&strlen(v)==4&&sscanf(v+1,"%1x%1x%1x",&r,&g,&b)==3){*out=0xff000000u|(r*17)|((g*17)<<8)|((b*17)<<16);return 1;}
     if(sscanf(v,"rgb(%u,%u,%u)",&r,&g,&b)==3&&r<=255&&g<=255&&b<=255){*out=0xff000000u|r|(g<<8)|(b<<16);return 1;}
     static const struct{const char *name;uint32_t value;} names[]={{"black",0xff000000},{"white",0xffffffff},{"red",0xff0000ff},{"green",0xff008000},{"blue",0xffff0000},{"gray",0xff808080},{"grey",0xff808080},{"yellow",0xff00ffff},{"navy",0xff800000},{"purple",0xff800080},{"orange",0xff00a5ff},{"transparent",0}};
-    for(size_t i=0;i<sizeof(names)/sizeof(*names);i++)if(eq(v,names[i].name)){*out=names[i].value;return 1;}return 0;
+    for(size_t i=0;i<sizeof(names)/sizeof(*names);i++)if(eq(v,names[i].name)){*out=names[i].value;return 1;}
+    return 0;
 }
 static void declarations(browser_style *s,const char *text,int priority)
 {
-    if(strlen(text)>=4096)return;char copy[4096];strcpy(copy,text);char *p=copy;
+    if(strlen(text)>=4096)return;
+    char copy[4096];strcpy(copy,text);char *p=copy;
     while(*p){char *next=strchr(p,';');if(next)*next++=0;char *colon=strchr(p,':');if(colon){*colon++=0;char *key=trim(p),*v=trim(colon),*important=strchr(v,'!');int is_important=important&&eq(trim(important+1),"important");if(important)*important=0;v=trim(v);if(is_important!=priority){if(!next)break;p=next;continue;}
         if(eq(key,"color"))color(v,&s->color);
         else if(eq(key,"background-color")||eq(key,"background"))color(v,&s->background);
@@ -98,7 +102,7 @@ browser_style css_compute(const browser_css *css,const browser_dom *dom,int inde
     static const char *blocks[]={"p","div","article","section","header","footer","main","nav","aside","h1","h2","h3","h4","h5","h6","li","ul","ol","tr","table","blockquote","pre","hr","br","form"};
     for(size_t i=0;i<sizeof(blocks)/sizeof(*blocks);i++)if(eq(n->tag,blocks[i]))s.block=1;
     if(eq(n->tag,"pre"))s.pre=1;
-    if(eq(n->tag,"b")||eq(n->tag,"strong")||eq(n->tag,"th")||n->tag[0]=='h'&&n->tag[1]>='1'&&n->tag[1]<='6'&&!n->tag[2])s.flags|=CSS_BOLD;
+    if(eq(n->tag,"b")||eq(n->tag,"strong")||eq(n->tag,"th")||(n->tag[0]=='h'&&n->tag[1]>='1'&&n->tag[1]<='6'&&!n->tag[2]))s.flags|=CSS_BOLD;
     if(eq(n->tag,"i")||eq(n->tag,"em"))s.flags|=CSS_ITALIC;
     if(eq(n->tag,"h1"))s.scale=0.95f;else if(eq(n->tag,"h2"))s.scale=0.82f;
     if(eq(n->tag,"a")){s.color=0xffe6bc52;s.flags|=CSS_UNDERLINE;}

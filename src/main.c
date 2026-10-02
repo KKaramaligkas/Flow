@@ -202,7 +202,8 @@ static void navigate(const char *url,int mode)
     const char *fragment=strchr(target,'#');
     if(page&&fragment){char current[BROWSER_URL_MAX],next[BROWSER_URL_MAX];strcpy(current,page->url);strcpy(next,target);current[strcspn(current,"#")]=0;next[strcspn(next,"#")]=0;
         if(!strcmp(current,next)){size_t offset=0;for(int i=0;i<page->anchor_count;i++)if(!strcmp(page->anchors[i].id,fragment+1))offset=page->anchors[i].offset;
-            for(int i=0;i<line_count;i++)if(page_lines[i].start+page_lines[i].length>=offset){scroll=i;break;}clamp_scroll();return;}}
+            for(int i=0;i<line_count;i++)if(page_lines[i].start+page_lines[i].length>=offset){scroll=i;break;}
+            clamp_scroll();return;}}
     if(!connect_wifi() || exit_requested) return;
     message[0]=0; failed_url[0]=0;
     if(history.count) history.visits[history.current].scroll=scroll;
@@ -258,7 +259,7 @@ static void collect(void)
             else if(page->links_omitted) notice("Only the first 256 links are available.");
         } else notice("Could not update browsing history.");
     } else if(browser_work.result==0) {
-        char saved[256]; snprintf(saved,sizeof(saved),"Saved: %s",browser_work.destination); notice(saved);
+        char saved[256]; snprintf(saved,sizeof(saved),"Saved: %.248s",browser_work.destination); notice(saved);
         failed_url[0]=0;
     } else if(browser_work.cancel) notice("Cancelled. Your current page is unchanged.");
     else {

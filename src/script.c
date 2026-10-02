@@ -11,7 +11,7 @@ typedef union { struct { size_t size; } h; long double align; void *pointer; } a
 static size_t usable(const void *p){return p?((const allocation *)p-1)->h.size:0;}
 static void *allocate(JSMallocState *s,size_t size){if(!size||size>SIZE_MAX-sizeof(allocation)||size+sizeof(allocation)>s->malloc_limit-s->malloc_size)return NULL;allocation *p=malloc(size+sizeof(*p));if(!p)return NULL;p->h.size=size;s->malloc_count++;s->malloc_size+=size+sizeof(*p);return p+1;}
 static void release(JSMallocState *s,void *p){if(p){s->malloc_size-=usable(p)+sizeof(allocation);s->malloc_count--;free((allocation *)p-1);}}
-static void *resize(JSMallocState *s,void *p,size_t size){if(!p)return allocate(s,size);if(!size){release(s,p);return NULL;}size_t old=usable(p);if(size>SIZE_MAX-sizeof(allocation)||size>old&&size-old>s->malloc_limit-s->malloc_size)return NULL;allocation *n=realloc((allocation *)p-1,size+sizeof(*n));if(!n)return NULL;n->h.size=size;s->malloc_size=s->malloc_size-old+size;return n+1;}
+static void *resize(JSMallocState *s,void *p,size_t size){if(!p)return allocate(s,size);if(!size){release(s,p);return NULL;}size_t old=usable(p);if(size>SIZE_MAX-sizeof(allocation)||(size>old&&size-old>s->malloc_limit-s->malloc_size))return NULL;allocation *n=realloc((allocation *)p-1,size+sizeof(*n));if(!n)return NULL;n->h.size=size;s->malloc_size=s->malloc_size-old+size;return n+1;}
 typedef struct {JSRuntime *runtime;JSContext *ctx;browser_document *doc;browser_fetch_fn fetch;void *fetch_ud;dom_cancel_fn cancel;void *cancel_ud;uint64_t start,network_wait;unsigned budget;int interrupted,fetches;size_t fetched;} script;
 static uint64_t milliseconds(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t)<0)return 0;return (uint64_t)t.tv_sec*1000+(uint64_t)t.tv_nsec/1000000;}
 static int interrupt(JSRuntime *rt,void *ud){(void)rt;script *s=ud;int stop=(s->cancel&&s->cancel(s->cancel_ud))||(milliseconds()-s->start-s->network_wait>=s->budget);if(stop)s->interrupted=1;return stop;}
@@ -50,7 +50,7 @@ int browser_script_run(browser_document *doc,browser_fetch_fn get,void *ud,dom_c
  JS_SetPropertyStr(s->ctx,global,"__seed",seed);JS_SetPropertyStr(s->ctx,global,"__url",JS_NewString(s->ctx,doc->url));JS_SetPropertyStr(s->ctx,global,"__resolve",JS_NewCFunction(s->ctx,resolve,"resolve",1));JS_SetPropertyStr(s->ctx,global,"__fetch",JS_NewCFunction(s->ctx,fetch,"fetch",1));JS_FreeValue(s->ctx,global);
  if(evaluated(s,dom_bootstrap,sizeof(dom_bootstrap)-1,"psp-dom.js")<0)goto end;
  /* A fixed initial script list: inserted scripts are not executed. */
- for(int i=0;i<doc->dom->count&&!s->interrupted;i++){dom_node *n=&doc->dom->nodes[i];if(strcmp(n->tag,"script"))continue;const char *type=dom_attr(n,"type");int module=!strcmp(type,"module");if(*type&&!module&&strcmp(type,"text/javascript")&&strcmp(type,"application/javascript"))continue;if(*dom_attr(n,"src")&&!n->text||*dom_attr(n,"data-ark-omitted")){doc->scripts_failed++;continue;}if(!n->text||!*n->text)continue;doc->scripts_run++;int failed;
+ for(int i=0;i<doc->dom->count&&!s->interrupted;i++){dom_node *n=&doc->dom->nodes[i];if(strcmp(n->tag,"script"))continue;const char *type=dom_attr(n,"type");int module=!strcmp(type,"module");if(*type&&!module&&strcmp(type,"text/javascript")&&strcmp(type,"application/javascript"))continue;if((*dom_attr(n,"src")&&!n->text)||*dom_attr(n,"data-ark-omitted")){doc->scripts_failed++;continue;}if(!n->text||!*n->text)continue;doc->scripts_run++;int failed;
     if(module){char name[BROWSER_URL_MAX];if(browser_url_resolve(doc->url,dom_attr(n,"src"),name,sizeof(name))<0)strcpy(name,doc->url);JSValue v=JS_Eval(s->ctx,n->text,strlen(n->text),name,JS_EVAL_TYPE_MODULE);failed=JS_IsException(v);JS_FreeValue(s->ctx,v);if(failed){v=JS_GetException(s->ctx);JS_FreeValue(s->ctx,v);}}
     else failed=evaluated(s,n->text,strlen(n->text),*dom_attr(n,"src")?dom_attr(n,"src"):"inline.js")<0;
     if(failed||jobs(s)<0)doc->scripts_failed++;}
@@ -58,6 +58,7 @@ int browser_script_run(browser_document *doc,browser_fetch_fn get,void *ud,dom_c
  if(evaluated(s,"__finish()",10,"load")<0||jobs(s)<0){doc->scripts_failed++;if(s->interrupted)goto end;}
  JSValue snapshot=JS_Eval(s->ctx,"__snapshot()",12,"DOM snapshot",JS_EVAL_TYPE_GLOBAL);size_t length=0;const char *output=JS_IsException(snapshot)?NULL:JS_ToCStringLen(s->ctx,&length,snapshot);
  browser_dom *next=calloc(1,sizeof(*next));if(output&&next&&dom_from_json(next,output,length)>=0){next->shortened=doc->dom->shortened;dom_free(doc->dom);free(doc->dom);doc->dom=next;result=browser_document_render(doc,err,errlen);}else {free(next);doc->scripts_failed++;}
- if(output)JS_FreeCString(s->ctx,output);JS_FreeValue(s->ctx,snapshot);
+ if(output)JS_FreeCString(s->ctx,output);
+ JS_FreeValue(s->ctx,snapshot);
  end:if(result<0){doc->scripts_failed++;snprintf(err,errlen,"JavaScript stopped (error, time or memory limit); showing the readable page.");}browser_script_free(doc);return result;
 }

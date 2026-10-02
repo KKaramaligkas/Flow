@@ -101,7 +101,8 @@ static void attributes(browser_dom *dom, int index, const char *p)
         while (*p && !whitespace(*p) && *p!='=' && *p!='/') p++;
         size_t n=(size_t)(p-start); if(!n){if(*p)p++;continue;}
         char name[65]; if(n>=sizeof(name))n=sizeof(name)-1;
-        for(size_t i=0;i<n;i++)name[i]=(char)tolower((unsigned char)start[i]);name[n]=0;
+        for(size_t i=0;i<n;i++)name[i]=(char)tolower((unsigned char)start[i]);
+        name[n]=0;
         while(whitespace(*p))p++;
         const char *v=p;size_t length=0;
         if(*p=='=') {
@@ -226,7 +227,8 @@ char *dom_json(const browser_dom *dom)
     if(!array)goto end;
     for(int i=0;i<dom->count;i++) {
         const dom_node *n=&dom->nodes[i];cJSON *o=cJSON_CreateObject();
-        if(!o)goto end;if(!cJSON_AddItemToArray(array,o)){cJSON_Delete(o);goto end;}
+        if(!o)goto end;
+        if(!cJSON_AddItemToArray(array,o)){cJSON_Delete(o);goto end;}
         if(!cJSON_AddStringToObject(o,"tag",n->tag)||!cJSON_AddStringToObject(o,"text",eq(n->tag,"script")?"":n->text?n->text:""))goto end;
         cJSON *a=cJSON_AddObjectToObject(o,"attrs"),*children=cJSON_AddArrayToObject(o,"children");
         if(!a||!children)goto end;

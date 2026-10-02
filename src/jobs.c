@@ -40,19 +40,20 @@ static void assets(browser_document *doc)
         dom_node *n=&doc->dom->nodes[i]; int script=!strcmp(n->tag,"script");
         int css=!strcmp(n->tag,"link")&&!strcmp(dom_attr(n,"rel"),"stylesheet");
         if(!script&&!css)continue;
-        const char *ref=dom_attr(n,script?"src":"href"); if(!*ref||script&&!browser_work.javascript)continue;
+        const char *ref=dom_attr(n,script?"src":"href"); if(!*ref||(script&&!browser_work.javascript))continue;
         char target[BROWSER_URL_MAX],err[256]; int limit=script?512*1024:64*1024;
         size_t left=script?1024*1024-script_bytes:128*1024-css_bytes;
         if(requests++>=16||!left||browser_url_resolve(base,ref,target,sizeof(target))<0||
-           browser_url_secure(doc->url)&&!browser_url_secure(target)||script&&!browser_same_origin(doc->url,target)) { doc->assets_omitted++; continue; }
+           (browser_url_secure(doc->url)&&!browser_url_secure(target))||(script&&!browser_same_origin(doc->url,target))) { doc->assets_omitted++; continue; }
         if((size_t)limit>left)limit=(int)left;
         net_response response;int length=0;
         char *data=net_get_info(target,limit,&length,&response,progress,NULL,err,sizeof(err));
-        if(data&&(browser_url_secure(doc->url)&&!browser_url_secure(response.url)||script&&!browser_same_origin(doc->url,response.url))) { free(data); data=NULL; }
+        if(data&&((browser_url_secure(doc->url)&&!browser_url_secure(response.url))||(script&&!browser_same_origin(doc->url,response.url)))) { free(data); data=NULL; }
         if(!data||memchr(data,0,(size_t)length)) {free(data);doc->assets_omitted++;continue;}
         if(css && (size_t)length+1>DOM_BYTES_MAX-doc->dom->bytes) {free(data);doc->assets_omitted++;continue;}
         if(script)script_bytes+=(size_t)length;else{css_bytes+=(size_t)length;doc->dom->bytes+=(size_t)length+1;}
         free(n->text); n->text=data;
+        if(script)dom_set_attr(doc->dom,i,"src",response.url);
     }
 }
 static int worker(SceSize args, void *argp)

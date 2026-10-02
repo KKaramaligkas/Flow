@@ -94,6 +94,7 @@ static void emit(writer *w, uint32_t c)
 static void line(writer *w)
 {
     while (w->used && w->doc->text[w->used - 1] == ' ') w->used--;
+    while(w->doc->span_count&&w->doc->spans[w->doc->span_count-1].offset>=w->used)w->doc->span_count--;
     if (w->used && w->doc->text[w->used - 1] != '\n' && w->used < BROWSER_TEXT_MAX - 64)
         w->doc->text[w->used++] = '\n';
     w->doc->text[w->used] = 0;
@@ -157,7 +158,8 @@ static void render_node(writer *w,int index,browser_style parent,const char *bas
         while(length&&((unsigned char)doc->text[l->offset+length]&0xc0)==0x80)length--;
         memcpy(l->label,doc->text+l->offset,length);l->label[length]=0;
         for(char *p=l->label;*p;p++)if(*p=='\n')*p=' ';
-        if(!length)snprintf(l->label,sizeof(l->label),"Link %d",active+1);marker(w,active+1);
+        if(!length)snprintf(l->label,sizeof(l->label),"Link %d",active+1);
+        marker(w,active+1);
     }
     if(style.block)line(w);
 }
@@ -174,7 +176,7 @@ int browser_document_render(browser_document *doc,char *err,size_t errlen)
         const dom_node *n=&doc->dom->nodes[i];
         if(equal(n->tag,"title")){doc->title[0]=0;title_text(doc->dom,i,doc->title,sizeof(doc->title));}
         if(equal(n->tag,"base")&&!base_set){char resolved[BROWSER_URL_MAX];if(*dom_attr(n,"href")&&browser_url_resolve(base,dom_attr(n,"href"),resolved,sizeof(resolved))==0){strcpy(base,resolved);base_set=1;}}
-        if((equal(n->tag,"style")||equal(n->tag,"link")&&equal(dom_attr(n,"rel"),"stylesheet"))&&n->text)css_add(&doc->css,n->text,strlen(n->text));
+        if((equal(n->tag,"style")||(equal(n->tag,"link")&&equal(dom_attr(n,"rel"),"stylesheet")))&&n->text)css_add(&doc->css,n->text,strlen(n->text));
     }
     browser_style initial={.color=0xfff2e8e0,.scale=0.64f,.pre=!doc->dom->html};
     writer w={.doc=doc,.html=doc->dom->html,.style=initial,.pre=initial.pre};
@@ -203,7 +205,7 @@ int browser_document_read(browser_document *doc,dom_read_fn read,void *ud,const 
     memset(doc,0,sizeof(*doc));
     if(!type)type="";
     int html=starts(type,"text/html")||starts(type,"application/xhtml+xml")||!*type;
-    if(browser_url_resolve(NULL,url,doc->url,sizeof(doc->url))<0||!html&&!starts(type,"text/")&&!starts(type,"application/json")){snprintf(err,errlen,"This is a file. Select Download to save it.");return -1;}
+    if(browser_url_resolve(NULL,url,doc->url,sizeof(doc->url))<0||(!html&&!starts(type,"text/")&&!starts(type,"application/json"))){snprintf(err,errlen,"This is a file. Select Download to save it.");return -1;}
     doc->dom=calloc(1,sizeof(*doc->dom));if(!doc->dom){snprintf(err,errlen,"Not enough memory for the page.");return -1;}
     int latin=find_case(type,"iso-8859-1")||find_case(type,"windows-1252");
     if(dom_parse(doc->dom,read,ud,html,latin,cancel,cancel_ud,err,errlen)<0){browser_document_free(doc);return -1;}

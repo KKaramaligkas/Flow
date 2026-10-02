@@ -7,7 +7,8 @@ int browser_layout(const browser_document *doc,browser_line *lines,int maximum,f
   while(pos<length&&doc->text[pos]!='\n'){size_t n=1;while(pos+n<length&&((unsigned char)doc->text[pos+n]&0xc0)==0x80)n++;
    browser_style style=browser_style_at(doc,pos);float w=measure(ud,doc->text+pos,n,style),h=style.scale*18+2;
    if(used+w>width&&pos>start){if(last_space>start){pos=last_space;used=space_width;}break;}
-   if(h>height)height=h;used+=w;pos+=n;if(doc->text[pos-n]==' '){last_space=pos;space_width=used;}
+   if(h>height)height=h;
+   used+=w;pos+=n;if(doc->text[pos-n]==' '){last_space=pos;space_width=used;}
   }
   lines[count++]=(browser_line){start,pos-start,used,height,align};
   if(pos<length&&doc->text[pos]=='\n')pos++;
