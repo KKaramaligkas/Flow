@@ -1,5 +1,5 @@
 TARGET = arkbrowser
-OBJS = src/main.o src/jobs.o src/url.o src/document.o src/dom.o src/css.o src/script.o src/layout.o src/session.o \
+OBJS = src/main.o src/jobs.o src/url.o src/document.o src/dom.o src/css.o src/script.o src/layout.o src/session.o src/view.o \
        vendor/quickjs/quickjs.o vendor/quickjs/cutils.o vendor/quickjs/dtoa.o vendor/quickjs/libregexp.o vendor/quickjs/libunicode.o \
        shared/net.o shared/http_policy.o shared/transfer.o shared/tlsdiag.o shared/clock.o shared/entropy.o \
        shared/stubs.o shared/resume.o shared/fs.o shared/util.o shared/gfx.o shared/text.o shared/input.o

@@ -25,6 +25,8 @@ typedef struct {
     size_t source_bytes;
     uint32_t paper;
     void *script;
+    int scripting;              /* JavaScript is on: <noscript> is skipped */
+    struct browser_view *view;  /* the laid-out page, NULL until built */
 } browser_document;
 int browser_document_parse(browser_document *doc, const char *data, size_t length,
                            const char *url, const char *content_type, char *err, size_t errlen);

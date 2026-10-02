@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "document.h"
+#include "view.h"
 
 typedef struct { browser_document *doc; size_t used, capacity; int html, pre, latin; browser_style style; } writer;
 
@@ -133,6 +134,7 @@ static void render_node(writer *w,int index,browser_style parent,const char *bas
     if(depth>=DOM_DEPTH_MAX)return;
     browser_style style=css_compute(&doc->css,dom,index,parent);
     if(style.hidden||equal(n->tag,"head")||equal(n->tag,"script")||equal(n->tag,"style")||equal(n->tag,"template")||equal(n->tag,"title")||equal(n->tag,"link"))return;
+    if(doc->scripting&&equal(n->tag,"noscript"))return;
     if(equal(n->tag,"body")&&style.background)doc->paper=style.background;
     w->style=style;w->pre=style.pre;
     if(style.block)line(w);
@@ -163,6 +165,11 @@ static void render_node(writer *w,int index,browser_style parent,const char *bas
     }
     if(style.block)line(w);
 }
+static int inside(const browser_dom *dom,int index,const char *tag)
+{
+    for(int i=dom->nodes[index].parent,depth=0;i>=0&&depth<DOM_DEPTH_MAX;i=dom->nodes[i].parent,depth++)if(equal(dom->nodes[i].tag,tag))return 1;
+    return 0;
+}
 int browser_document_render(browser_document *doc,char *err,size_t errlen)
 {
     char *text=calloc(1,BROWSER_TEXT_MAX);browser_span *spans=calloc(CSS_SPANS_MAX,sizeof(*spans));
@@ -176,9 +183,9 @@ int browser_document_render(browser_document *doc,char *err,size_t errlen)
         const dom_node *n=&doc->dom->nodes[i];
         if(equal(n->tag,"title")){doc->title[0]=0;title_text(doc->dom,i,doc->title,sizeof(doc->title));}
         if(equal(n->tag,"base")&&!base_set){char resolved[BROWSER_URL_MAX];if(*dom_attr(n,"href")&&browser_url_resolve(base,dom_attr(n,"href"),resolved,sizeof(resolved))==0){strcpy(base,resolved);base_set=1;}}
-        if((equal(n->tag,"style")||(equal(n->tag,"link")&&equal(dom_attr(n,"rel"),"stylesheet")))&&n->text)css_add(&doc->css,n->text,strlen(n->text));
+        if((equal(n->tag,"style")||(equal(n->tag,"link")&&equal(dom_attr(n,"rel"),"stylesheet")))&&n->text&&!(doc->scripting&&inside(doc->dom,i,"noscript")))css_add(&doc->css,n->text,strlen(n->text));
     }
-    browser_style initial={.color=0xfff2e8e0,.scale=0.64f,.pre=!doc->dom->html};
+    browser_style initial={.color=0xfff2e8e0,.link=0xffe6bc52,.scale=0.64f,.pre=!doc->dom->html};
     writer w={.doc=doc,.html=doc->dom->html,.style=initial,.pre=initial.pre};
     render_node(&w,0,initial,base,0);
     doc->shortened|=previously_shortened;doc->css_omitted|=doc->css.omitted;
@@ -188,7 +195,7 @@ int browser_document_render(browser_document *doc,char *err,size_t errlen)
 }
 browser_style browser_style_at(const browser_document *doc,size_t offset)
 {
-    browser_style style={.color=0xfff2e8e0,.scale=0.64f};
+    browser_style style={.color=0xfff2e8e0,.link=0xffe6bc52,.scale=0.64f};
     int low=0,high=doc->span_count;while(low<high){int mid=low+(high-low)/2;if(doc->spans[mid].offset<=offset)low=mid+1;else high=mid;}
     if(low)style=doc->spans[low-1].style;
     return style;
@@ -196,6 +203,7 @@ browser_style browser_style_at(const browser_document *doc,size_t offset)
 void browser_script_free(browser_document *);
 void browser_document_free(browser_document *doc)
 {
+    if(doc->view){browser_view_free(doc->view);free(doc->view);}
     browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);
     if(doc->dom){dom_free(doc->dom);free(doc->dom);}memset(doc,0,sizeof(*doc));
 }

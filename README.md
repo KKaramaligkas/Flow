@@ -1,8 +1,9 @@
-# ARK Browser 0.2
+# ARK Browser 0.3
 
-A standalone PSP browser with on-device QuickJS, basic CSS text rendering and
-direct, verified TLS 1.2 HTTPS. All parsing and JavaScript run on the PSP. No
-proxy or remote rendering service is required.
+A standalone PSP browser that lays pages out on the PSP itself, with CSS boxes,
+tables, form fields and a pointer you move with the analog stick. It runs
+JavaScript with QuickJS and fetches pages over verified TLS 1.2 HTTPS. No proxy
+or remote rendering service is involved.
 
 ## Install
 
@@ -17,30 +18,87 @@ manually; it is not available through the live store. The ARK updater does not
 install the browser automatically. This application does not flash firmware.
 
 The user reported that 0.1 works on PSP-3000 with CERN and CNN Lite. That report
-covers the original browser. This 0.2 build still requires physical testing;
-host tests and PSP/Vita compilation do not prove modern-site compatibility.
+covers the original browser. This 0.3 build was tested in PPSSPP against local
+test pages (search, sign-in and article pages); it still needs testing on a
+real PSP, and host tests do not prove that modern sites work.
 
 ## Controls
 
-Confirm and Cancel follow the system button preference.
+Confirm (✕ by default) and Cancel follow the system button preference.
 
-| Button | Action |
+| Button | Page view |
 | --- | --- |
-| Triangle | Address entry; a hostname without a scheme uses HTTPS |
-| Up / Down | Scroll, or choose a link in the link list |
-| Left / Right | Scroll a page |
-| L / R | Select previous / next numbered link |
-| Confirm | Open selected link, including in-page anchors |
-| Cancel | Back, or cancel loading / JavaScript |
-| Select | Toggle the link list |
-| Square | Download selected link or current page |
-| Start | Address, back, reload, download, Wi-Fi, home, JavaScript toggle, exit |
+| Analog stick | Move the pointer; push it past the top or bottom edge to scroll |
+| Confirm | Click what the pointer is on: open a link, type into a field, tick a box, choose an option, press a button |
+| L / R | Jump the pointer to the previous / next link or field |
+| Up / Down | Scroll |
+| Left / Right | Scroll a screen at a time |
+| Triangle | Enter an address, or words to search for |
+| Cancel | Back, or cancel loading |
+| Square | Download the link under the pointer, or the current page |
+| Select | Switch to the reader view |
+| Start | Menu: address, back, forward, reload, link list, reader view, download, home, Wi-Fi, JavaScript, clear cookies, exit |
 
-JavaScript is enabled by default. Toggle it from Start and reload to apply.
-Failed or cancelled navigation retains the current page and history. Back
-reloads a previous address. Downloads go into `downloads/`, keep existing files,
-and can resume when retried if the server supports it. They never execute
-or install automatically. After a page fails, Square downloads that address.
+The status bar shows where the link under the pointer goes, or what Confirm
+will do to the field under it. In a drop-down list, Up/Down choose, Confirm
+picks and Cancel closes it.
+
+The reader view (Select) shows the page as plain text with numbered links: L/R
+select a link, Confirm opens it, Up/Down scroll, Left/Right scroll a screen,
+and Select returns to the page view. The link list (Start menu) lists the
+page's links, up to 256.
+
+Words typed at Triangle that aren't an address (with spaces, or no dot) are
+searched on DuckDuckGo Lite, which works without JavaScript. An address without
+a scheme uses HTTPS. JavaScript is enabled by default; toggle it from Start and
+reload to apply. Failed or cancelled navigation keeps the current page and
+history. Back reloads a previous address. Downloads go into `downloads/`, keep
+existing files, and can resume when retried if the server supports it. They
+never execute or install automatically. After a page fails, Square downloads
+that address.
+
+## Page view
+
+Pages are laid out like a desktop browser's normal flow, scaled to the PSP's
+480x272 screen (one CSS pixel is 0.6 PSP pixels). Blocks stack with their
+margins, padding, borders, backgrounds and widths; text wraps at spaces with
+bold, sizes, colors, underlines, strike-through and text-transform; lists get
+bullets or numbers; tables share their width between columns by content, with
+`colspan`, cell padding, spacing and borders. An inline-block holding blocks
+(a menu or a card) becomes a box as wide as its content.
+
+Text hidden for screen readers, `display:none`, `visibility:hidden` and
+off-screen text are not shown. Floats and positioning are ignored, so floated
+boxes appear in reading order. Flex and grid containers are laid out as normal
+blocks; `justify-content` aligns their inline content. Images are not
+downloaded: they show as boxes with their description (`alt` text), at their
+size when the page gives it. Italic text is drawn upright, and CSS font
+families are not used.
+
+## Forms and cookies
+
+Text, password and multi-line fields open the PSP's on-screen keyboard.
+Checkboxes, radio buttons, drop-down lists, and submit and reset buttons work as
+on a computer, and labels point to their fields. Forms are sent with GET or POST
+(`application/x-www-form-urlencoded`); a form with one text field, such as a
+search box, is sent when you finish typing. Forms that upload files send only
+their text fields. Buttons handled by JavaScript don't respond, because scripts
+run only while the page loads.
+
+Cookies are kept in `cookies.txt` next to the app, so sites can keep you signed
+in. They are sent with page, stylesheet, script and `fetch` requests. Clear
+them from the Start menu.
+
+Some sites need more than this browser offers: Google, for example, may ask
+you to turn on JavaScript instead of showing results. DuckDuckGo Lite works.
+
+## PPSSPP
+
+ARK Browser runs in PPSSPP. Recent PPSSPP versions have the PSP's fonts only
+when a PSP firmware is installed in them; without the fonts the browser uses a
+basic built-in font and shows a notice when it starts. To get the normal fonts,
+install a firmware in PPSSPP ("Install PSP firmware update" on a game disc's
+info screen). Wi-Fi in PPSSPP uses the computer's internet connection.
 
 ## JavaScript
 
@@ -52,33 +110,34 @@ loading, with bounded same-origin module imports and promise jobs.
 The reader DOM implements basic element/text creation, querySelector(All), ID,
 tag and class queries, textContent, innerText, a limited innerHTML fragment
 parser, append/remove/insert, attributes, classList and inline style changes.
-DOMContentLoaded and load handlers run before the final reader view. `fetch`
+DOMContentLoaded and load handlers run before the page is laid out. `fetch`
 supports same-origin GET with text/JSON promise responses. Requests and redirects
-must remain same-origin; cookies, authorization and custom headers are absent.
+must remain same-origin; they carry the browser's cookies, but `document.cookie`,
+authorization and custom headers are absent.
 
 This is a small browser DOM, not the full Web platform. Selectors support tags,
 IDs, classes and descendants. Node collections are snapshots. The fragment
 parser is deliberately limited. One-shot function timers run once after loading;
 requested delays are not emulated. There is no persistent event loop after
-loading, click handler dispatch, setInterval, interactive form submission,
+loading, click handler dispatch, setInterval, script-driven form submission,
 XHR, WebSocket, storage, canvas, layout measurement, workers or OS bindings.
 `location` is a read-only address snapshot. Full SPA frameworks and most modern
 interactive sites will still fail. Failed scripts show available readable text.
 
-## CSS and reader view
+## CSS
 
 Inline style, style blocks and external stylesheets support tag/ID/class,
 descendant and child selectors, specificity, source order and `!important`.
-Supported properties include color, simple background color, font size/weight,
-underline, text alignment, white space, display and visibility. Bold firmware
-fonts, variable text sizes, colors and underlines appear in the reader view.
-Italic is parsed but the firmware font renderer does not draw a slant.
+Supported properties include color, background color, font size/weight/style,
+text decoration and transform, text alignment, white space, display,
+visibility, list style, margin, padding, border, width, max-width and height,
+in px, em, rem, pt, %, vw and vh. Old HTML attributes (`bgcolor`, `align`,
+`width`, `<font>`, `<center>`) work too.
 
 Screen media blocks are accepted; print blocks are ignored. Width/feature media
-queries are not evaluated. Flex/grid declarations become linear blocks;
-positioning, columns, box sizing, margins, CSS variables, animations, pseudo
-classes, attribute selectors, @import and image backgrounds are unavailable.
-Images show alt text; images, audio, video and tabs are not implemented.
+queries are not evaluated. Floats, positioning, columns, box sizing, CSS
+variables, animations, pseudo classes, attribute selectors, @import and
+background images are unavailable.
 
 ## Larger pages and PSP limits
 
@@ -88,7 +147,9 @@ The temporary file is deleted after use or transfer failure. A forced power-off
 may leave it behind; the next load replaces it. Decoded responses are capped at
 8 MB, reader text at 256 KB, links at 256, anchors at 128 and DOM nodes at 2,048.
 DOM text/attributes are bounded at 768 KB and nesting at 64. Oversized script
-blocks are skipped while parsing continues to later readable content.
+blocks are skipped while parsing continues to later readable content. The page
+view holds up to 16,384 laid-out pieces with 512 KB of text, 1,024 links, 256
+form fields and 32 forms; longer pages are cut off with a notice.
 
 Stylesheets are limited to 64 KB each / 128 KB total / 256 rules. Scripts are
 limited to 512 KB each / 1 MB source total; asset requests are capped at 16.
@@ -119,8 +180,10 @@ built without OS helpers or atomics; see `vendor/quickjs/README.ark.md`.
 development packages, Python and OpenSSL. Address/undefined-behavior sanitizers
 cover URL/HTML/history regressions, streaming boundaries and multi-MB scripts,
 CSS cascade, DOM mutations, modern syntax, promises, GET, module and resource
-failures, cancellation and infinite loops. The transport fixtures verify TLS
-1.2, invalid certificates, downgrade rejection and redirect limits.
+failures, cancellation and infinite loops. The page view tests cover text flow
+and line breaking, boxes, lists, tables, form fields and submission, links,
+anchors and pointer movement. The transport fixtures verify TLS 1.2, invalid
+certificates, downgrade rejection and redirect limits.
 
 Follow [the hardware checklist](../docs/hardware-release-checklist.md) on a
 physical PSP before treating this build as device-validated.
