@@ -1,4 +1,4 @@
-/* ARK Browser page view: lays out the DOM with its CSS into positioned
+/* Flow page view: lays out the DOM with its CSS into positioned
    items, much like a desktop browser's normal flow, scaled for the PSP:
    blocks stack, inline text wraps into lines, tables split their width
    between columns, and form fields, images and list markers are boxes. */

@@ -1,6 +1,6 @@
 CC ?= cc
 CFLAGS ?= -O1 -g -Wall -Wextra -std=gnu99 -fsanitize=address,undefined
-CPPFLAGS += -I../PluginManager/src -I../vendor/quickjs -DARKB_NO_ATOMICS -D_GNU_SOURCE -DCONFIG_VERSION=\"2026-06-04\"
+CPPFLAGS += -I../PluginManager/src -I../vendor/quickjs -DFLOW_NO_ATOMICS -D_GNU_SOURCE -DCONFIG_VERSION=\"2026-06-04\"
 LDLIBS ?= -lcjson -lm
 CORE = ../src/url.c ../src/document.c ../src/dom.c ../src/css.c ../src/script.c ../src/session.c ../src/layout.c ../src/view.c
 QJS = quickjs cutils dtoa libregexp libunicode

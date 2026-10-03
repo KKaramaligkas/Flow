@@ -1,4 +1,4 @@
-/* ARK Browser: direct HTTP(S), a laid-out page with a cursor, a reader view
+/* Flow: direct HTTP(S), a laid-out page with a cursor, a reader view
    and on-device JavaScript. */
 #include <math.h>
 #include <stdio.h>
@@ -21,7 +21,7 @@
 #include "text.h"
 #include "util.h"
 
-PSP_MODULE_INFO("ARKBrowser",PSP_MODULE_USER,0,3);
+PSP_MODULE_INFO("Flow",PSP_MODULE_USER,0,3);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER|PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_THRESHOLD_SIZE_KB(4*1024);
 #define PAGE_LINES 16
@@ -58,7 +58,7 @@ static int exit_callback(int a,int b,void *ud)
 static int callbacks(SceSize args,void *argp)
 {
     (void)args; (void)argp;
-    int cb=sceKernelCreateCallback("arkb_exit",exit_callback,NULL);
+    int cb=sceKernelCreateCallback("flow_exit",exit_callback,NULL);
     sceKernelRegisterExitCallback(cb); sceKernelSleepThreadCB(); return 0;
 }
 static void notice(const char *text) { pm_strlcpy(message,text,sizeof(message)); }
@@ -301,11 +301,11 @@ static void draw_scene(void *ud)
     /* address bar */
     gfx_rect(0,0,480,TOP,RGB(23,40,57));
     int secure=history.count&&browser_url_secure(page->url);
-    const char *badge=!history.count?"ARK":secure?"HTTPS":"HTTP";
+    const char *badge=!history.count?"Flow":secure?"HTTPS":"HTTP";
     float bw=text_width(badge,0.48f,TEXT_BOLD)+8;
     gfx_round_rect(3,3,bw,12,3,!history.count?RGB(60,90,120):secure?RGB(40,140,90):RGB(170,110,40));
     text_draw(7,3,badge,0.48f,RGB(255,255,255),TEXT_BOLD);
-    text_draw_fit(bw+8,2,468-bw,history.count?page->url:"ARK Browser " APP_VERSION " - Triangle: address or search",0.52f,FG,0);
+    text_draw_fit(bw+8,2,468-bw,history.count?page->url:"Flow " APP_VERSION " - Triangle: address or search",0.52f,FG,0);
     /* status bar */
     gfx_rect(0,BOTTOM,480,SCREEN_H-BOTTOM,RGB(18,32,47));
     char status[BROWSER_URL_MAX+64];
@@ -379,9 +379,9 @@ static void utf16_to_utf8(const unsigned short *s,char *out,size_t size)
 static int keyboard(const char *title,const char *initial,char *out,size_t size,int lines)
 {
 #ifdef PM_AUTOTEST
-    /* Test builds type the lines of ms0:/arkb_osk.txt, one per keyboard. */
+    /* Test builds type the lines of ms0:/flow_osk.txt, one per keyboard. */
     static char *answers,*answer;
-    if(!answers) answer=answers=fs_read_all("ms0:/arkb_osk.txt",NULL,16*1024);
+    if(!answers) answer=answers=fs_read_all("ms0:/flow_osk.txt",NULL,16*1024);
     if(!answer||!*answer) return 0;
     size_t length=strcspn(answer,"\r\n");
     if(length>=size) length=size-1;
@@ -499,8 +499,8 @@ static void download_file(void)
 }
 static void home(void)
 {
-    const char *html="<title>ARK Browser " APP_VERSION "</title><body style='background:#f3f5f8;color:#202428'>"
-        "<h1 style='color:#1d4f7c;margin-bottom:4px'>ARK Browser</h1>"
+    const char *html="<title>Flow " APP_VERSION "</title><body style='background:#f3f5f8;color:#202428'>"
+        "<h1 style='color:#1d4f7c;margin-bottom:4px'>Flow</h1>"
         "<form action='https://lite.duckduckgo.com/lite/'><input name=q size=44 placeholder='Search the web'> <input type=submit value=Search></form>"
         "<p>Move the cursor with the analog stick and press Confirm to open a link or fill in a field. "
         "Up/Down scroll, Left/Right turn pages, L/R jump between links and fields. "
@@ -713,7 +713,7 @@ static void menu_action(int choice)
 }
 int main(int argc,char **argv)
 {
-    int callback_thread=sceKernelCreateThread("arkb_callbacks",callbacks,0x11,0x1000,PSP_THREAD_ATTR_USER,NULL);
+    int callback_thread=sceKernelCreateThread("flow_callbacks",callbacks,0x11,0x1000,PSP_THREAD_ATTR_USER,NULL);
     if(callback_thread>=0) sceKernelStartThread(callback_thread,0,NULL);
     scePowerSetClockFrequency(333,333,166);
     entropy_init(); gfx_init();
@@ -721,10 +721,10 @@ int main(int argc,char **argv)
     input_init();
     input_set_analog_dpad(0);
     if(argc && argv[0]) pm_dirname(argv[0],app_dir,sizeof(app_dir));
-    if(!app_dir[0]) strcpy(app_dir,"ms0:/PSP/GAME/ARKBrowser/");
+    if(!app_dir[0]) strcpy(app_dir,"ms0:/PSP/GAME/Flow/");
     snprintf(downloads,sizeof(downloads),"%sdownloads/",app_dir);
     char ca[256]; snprintf(ca,sizeof(ca),"%scacert.pem",app_dir);
-    net_set_tls(ca,1); net_set_client("Mozilla/5.0 (PlayStation Portable; Mobile) ARKBrowser/" APP_VERSION,1);
+    net_set_tls(ca,1); net_set_client("Mozilla/5.0 (PlayStation Portable; Mobile) Flow/" APP_VERSION,1);
     char cookies[256]; snprintf(cookies,sizeof(cookies),"%scookies.txt",app_dir); net_set_cookies(cookies);
     char cache_dir[256],cache[256];snprintf(cache_dir,sizeof(cache_dir),"%s.cache/",app_dir);
     int cache_ok=fs_mkdirs(cache_dir,NULL,NULL);snprintf(cache,sizeof(cache),"%s.cache/page.tmp",app_dir);

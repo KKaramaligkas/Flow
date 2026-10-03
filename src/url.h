@@ -1,6 +1,6 @@
-/* ARK Browser: bounded HTTP(S) URL handling, independent of the PSP SDK. */
-#ifndef ARKB_URL_H
-#define ARKB_URL_H
+/* Flow: bounded HTTP(S) URL handling, independent of the PSP SDK. */
+#ifndef FLOW_URL_H
+#define FLOW_URL_H
 #include <stddef.h>
 #define BROWSER_URL_MAX 1024
 int browser_url_resolve(const char *base, const char *reference, char *out, size_t size);

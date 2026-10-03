@@ -71,7 +71,7 @@
 
 /* define to include Atomics.* operations which depend on the OS
    threads */
-#if !defined(__EMSCRIPTEN__) && !defined(ARKB_NO_ATOMICS)
+#if !defined(__EMSCRIPTEN__) && !defined(FLOW_NO_ATOMICS)
 #define CONFIG_ATOMICS
 #endif
 
@@ -4571,7 +4571,7 @@ const char *JS_ToCStringLen2(JSContext *ctx, size_t *plen, JSValueConst val1, BO
         *plen = str_new->len;
     return (const char *)str_new->u.str8;
  fail:
-    /* ARK Browser: release the string when the copy can't be allocated
+    /* Flow: release the string when the copy can't be allocated
        (memory limit); it leaked here. */
     JS_FreeValue(ctx, val);
     if (plen)

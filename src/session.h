@@ -1,5 +1,5 @@
-#ifndef ARKB_SESSION_H
-#define ARKB_SESSION_H
+#ifndef FLOW_SESSION_H
+#define FLOW_SESSION_H
 #include "url.h"
 #define BROWSER_HISTORY_MAX 12
 #define NAV_NEW 0

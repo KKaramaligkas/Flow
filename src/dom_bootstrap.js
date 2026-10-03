@@ -194,7 +194,7 @@ Object.assign(XMLHttpRequest,{UNSENT:0,OPENED:1,HEADERS_RECEIVED:2,LOADING:3,DON
 Object.assign(globalThis,{document,Node,Element:Node,HTMLElement:Node,SVGElement:Node,Text:Node,Comment:Node,DocumentFragment:Node,Document:Node,HTMLDocument:Node,
  HTMLAnchorElement:Node,HTMLButtonElement:Node,HTMLDivElement:Node,HTMLFormElement:Node,HTMLImageElement:Node,HTMLInputElement:Node,HTMLScriptElement:Node,HTMLSelectElement:Node,HTMLSpanElement:Node,HTMLTemplateElement:Node,HTMLTextAreaElement:Node,
  Event,CustomEvent,URL,URLSearchParams,XMLHttpRequest,window:globalThis,self:globalThis,top:globalThis,parent:globalThis,frames:globalThis,
- navigator:{userAgent:'Mozilla/5.0 (PlayStation Portable; Mobile) ARKBrowser/0.3',platform:'PSP',language:'en',languages:['en'],onLine:true,cookieEnabled:false,maxTouchPoints:0,sendBeacon:()=>false},
+ navigator:{userAgent:'Mozilla/5.0 (PlayStation Portable; Mobile) Flow/0.3',platform:'PSP',language:'en',languages:['en'],onLine:true,cookieEnabled:false,maxTouchPoints:0,sendBeacon:()=>false},
  location,history:{length:1,state:null,scrollRestoration:'auto',pushState(){},replaceState(){},back(){},forward(){},go(){}},
  screen:{width:480,height:272,availWidth:480,availHeight:272,colorDepth:32,pixelDepth:32},
  innerWidth:786,innerHeight:453,outerWidth:786,outerHeight:453,devicePixelRatio:1,scrollX:0,scrollY:0,pageXOffset:0,pageYOffset:0,

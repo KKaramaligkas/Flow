@@ -1,7 +1,7 @@
-/* ARK Browser page view: a laid-out page as a list of positioned items.
+/* Flow page view: a laid-out page as a list of positioned items.
    Coordinates are page pixels: x from the left edge, y from the top. */
-#ifndef ARKB_VIEW_H
-#define ARKB_VIEW_H
+#ifndef FLOW_VIEW_H
+#define FLOW_VIEW_H
 #include <stddef.h>
 #include <stdint.h>
 #include "document.h"

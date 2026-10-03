@@ -1,6 +1,6 @@
 /* Bounded reader view of a streamed DOM, with CSS and optional JavaScript. */
-#ifndef ARKB_DOCUMENT_H
-#define ARKB_DOCUMENT_H
+#ifndef FLOW_DOCUMENT_H
+#define FLOW_DOCUMENT_H
 #include <stddef.h>
 #include "url.h"
 #include "dom.h"

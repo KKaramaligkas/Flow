@@ -1,4 +1,4 @@
-/* ARK Browser CSS: the cascade of the rules a page can use, sized for the PSP.
+/* Flow CSS: the cascade of the rules a page can use, sized for the PSP.
    Stylesheets are reduced to the rules whose subject occurs in the page
    (css_compact), @media queries see the page view's width, rules are indexed
    by their subject's id, class or tag, and var() resolves per element. */

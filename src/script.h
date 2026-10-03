@@ -1,5 +1,5 @@
-#ifndef ARKB_SCRIPT_H
-#define ARKB_SCRIPT_H
+#ifndef FLOW_SCRIPT_H
+#define FLOW_SCRIPT_H
 #include "document.h"
 /* Fetch returns malloc-owned UTF-8 bytes. Redirects must stay same-origin. */
 typedef char *(*browser_fetch_fn)(void *,const char *,int,int *,char *,size_t);

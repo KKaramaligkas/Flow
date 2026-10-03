@@ -13,7 +13,7 @@ int main(int argc,char **argv)
     if(argc<3)return 2;
     curl_global_init(CURL_GLOBAL_ALL);
     CURL *curl=curl_easy_init();
-    CURLcode result=pm_http_policy(curl,argv[1],"ARKBrowser-test",1);
+    CURLcode result=pm_http_policy(curl,argv[1],"Flow-test",1);
     if(result!=CURLE_OK)return 2;
     curl_easy_setopt(curl,CURLOPT_URL,argv[1]);
     curl_easy_setopt(curl,CURLOPT_PROXY,""); /* local test fixtures only */

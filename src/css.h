@@ -1,5 +1,5 @@
-#ifndef ARKB_CSS_H
-#define ARKB_CSS_H
+#ifndef FLOW_CSS_H
+#define FLOW_CSS_H
 #include <stdint.h>
 #include "dom.h"
 #define CSS_RULES_MAX 4096

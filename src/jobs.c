@@ -54,7 +54,7 @@ static unsigned phase_start;
 static void phase(const char *name)
 {
     unsigned now=sceKernelGetSystemTimeLow();
-    FILE *f=fopen("ms0:/arkb_timing.txt","a");
+    FILE *f=fopen("ms0:/flow_timing.txt","a");
     if(f){fprintf(f,"%s %u ms\n",name,(now-phase_start)/1000);fclose(f);}
     phase_start=sceKernelGetSystemTimeLow();
 }
@@ -121,9 +121,9 @@ int browser_jobs_start(const char *cache)
 {
     if(pm_strlcpy(page_cache,cache,sizeof(page_cache))>=sizeof(page_cache))return -1;
     quit=0;
-    wake=sceKernelCreateSema("arkb_jobs",0,0,1,NULL);
+    wake=sceKernelCreateSema("flow_jobs",0,0,1,NULL);
     if(wake<0) return -1;
-    thread=sceKernelCreateThread("arkb_worker",worker,0x30,512*1024,PSP_THREAD_ATTR_USER|PSP_THREAD_ATTR_VFPU,NULL);
+    thread=sceKernelCreateThread("flow_worker",worker,0x30,512*1024,PSP_THREAD_ATTR_USER|PSP_THREAD_ATTR_VFPU,NULL);
     if(thread<0 || sceKernelStartThread(thread,0,NULL)<0) {
         if(thread>=0) sceKernelDeleteThread(thread);
         sceKernelDeleteSema(wake); thread=wake=-1; return -1;

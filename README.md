@@ -1,20 +1,25 @@
-# ARK Browser 0.3
+# Flow 0.3
 
 A standalone PSP browser that lays pages out on the PSP itself, with CSS boxes,
 tables, form fields and a pointer you move with the analog stick. It runs
 JavaScript with QuickJS and fetches pages over verified TLS 1.2 HTTPS. No proxy
 or remote rendering service is involved.
 
-This repository is the browser's source. It was split from
-[FasterARK powerup](https://github.com/KKaramaligkas/FasterARK_powerup), with its history, so that it can be developed on
-its own; FasterARK ships it in its Full package and its store.
+This repository is the browser's source. Until version 0.3.1 it was ARK
+Browser, part of [FasterARK powerup](https://github.com/KKaramaligkas/FasterARK_powerup);
+it was split from there with its history so that it can be developed on its
+own. FasterARK ships it in its Full package and its store.
 
 ## Install
 
-Extract `ARKBrowser.zip` to your PSP storage root so that the app is at
-`PSP/GAME/ARKBrowser/EBOOT.PBP`, alongside `cacert.pem`. Keep an existing
-`downloads/` folder. Launch ARK Browser from Game. On PSP Go choose the storage
+Extract `Flow.zip` to your PSP storage root so that the app is at
+`PSP/GAME/Flow/EBOOT.PBP`, alongside `cacert.pem`. Keep an existing
+`downloads/` folder. Launch Flow from Game. On PSP Go choose the storage
 for the app; on Vita/Adrenaline use your configured `pspemu` folder.
+
+Coming from ARK Browser: Flow keeps its downloads, cookies and cache in its own
+folder, `PSP/GAME/Flow`. Your old downloads stay in `PSP/GAME/ARKBrowser/downloads`
+until you move or delete them, and sites you were signed in to will ask again.
 
 The Full FasterARK package includes the browser. Plugin Manager installs its
 entry after the matching release is published. A draft PR artifact is installed
@@ -106,7 +111,7 @@ you to turn on JavaScript instead of showing results. DuckDuckGo Lite works.
 
 ## PPSSPP
 
-ARK Browser runs in PPSSPP. Recent PPSSPP versions have the PSP's fonts only
+Flow runs in PPSSPP. Recent PPSSPP versions have the PSP's fonts only
 when a PSP firmware is installed in them; without the fonts the browser uses a
 basic built-in font and shows a notice when it starts. To get the normal fonts,
 install a firmware in PPSSPP ("Install PSP firmware update" on a game disc's
@@ -220,12 +225,12 @@ Clone with `git clone --recursive`: the
 submodule in `PluginManager/`, and the browser builds its network, text, input
 and drawing code, ships its `cacert.pem` and runs its import check.
 
-`make package` builds `dist/ARKBrowser.zip`. It needs the
+`make package` builds `dist/Flow.zip`. It needs the
 [pspdev](https://github.com/pspdev/pspdev) toolchain and
 `psp-pacman -S curl mbedtls cjson libintrafont zlib`; CI uses the same pinned
 SDK inputs as FasterARK (`tools/toolchains.json`). QuickJS engine sources are
 vendored and built without OS helpers or atomics; see
-`vendor/quickjs/README.ark.md`.
+`vendor/quickjs/README.flow.md`.
 
 `make -C tests check` requires a native C compiler, cJSON and libcurl
 development packages, Python and OpenSSL. Address/undefined-behavior sanitizers

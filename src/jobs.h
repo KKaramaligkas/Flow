@@ -1,5 +1,5 @@
-#ifndef ARKB_JOBS_H
-#define ARKB_JOBS_H
+#ifndef FLOW_JOBS_H
+#define FLOW_JOBS_H
 #include <stdint.h>
 #include "document.h"
 #define BROWSER_JOB_PAGE 1

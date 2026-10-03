@@ -1,5 +1,5 @@
-#ifndef ARKB_DOM_H
-#define ARKB_DOM_H
+#ifndef FLOW_DOM_H
+#define FLOW_DOM_H
 #include <stddef.h>
 #define DOM_NODES_MAX 16384     /* the node array grows to this as a page needs */
 #define DOM_BYTES_MAX (768 * 1024)
