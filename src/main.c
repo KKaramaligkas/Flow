@@ -7,6 +7,7 @@
 #include <pspkernel.h>
 #include <psppower.h>
 #include <psputility.h>
+#include "adopt.h"
 #include "document.h"
 #include "layout.h"
 #include "view.h"
@@ -711,6 +712,27 @@ static void menu_action(int choice)
     case M_EXIT: exit_requested=1; break;
     }
 }
+/* Flow was ARK Browser up to 0.3.1: take over the downloads and cookies left
+   in its old folder (adopt.c). Copying shows its progress. */
+static void adopt_frame(void *ud,int index,int total)
+{
+    char text[96];
+    snprintf(text,sizeof(text),"Moving your ARK Browser downloads to Flow: %d of %d...",index+1,total);
+    notice(text); scePowerTick(PSP_POWER_TICK_ALL); frame();
+}
+static void adopt_ark_browser(void)
+{
+    adopt_result r;
+    if(adopt_old_folder(app_dir,"ARKBrowser",adopt_frame,NULL,&r)<0) return;
+    char text[192]; text[0]=0;
+    const char *s=r.downloads==1?"":"s";
+    if(r.downloads&&r.cookies) snprintf(text,sizeof(text),"Moved your ARK Browser cookies and %d download%s into Flow.",r.downloads,s);
+    else if(r.downloads) snprintf(text,sizeof(text),"Moved your %d ARK Browser download%s into Flow's downloads folder.",r.downloads,s);
+    else if(r.cookies) snprintf(text,sizeof(text),"Moved your ARK Browser cookies to Flow, so you stay signed in.");
+    if(r.failed) snprintf(text+strlen(text),sizeof(text)-strlen(text),"%s%d download%s couldn't be moved; see PSP/GAME/ARKBrowser/downloads.",
+        text[0]?" ":"",r.failed,r.failed==1?"":"s");
+    if(text[0]) notice(text);
+}
 int main(int argc,char **argv)
 {
     int callback_thread=sceKernelCreateThread("flow_callbacks",callbacks,0x11,0x1000,PSP_THREAD_ATTR_USER,NULL);
@@ -730,6 +752,7 @@ int main(int argc,char **argv)
     int cache_ok=fs_mkdirs(cache_dir,NULL,NULL);snprintf(cache,sizeof(cache),"%s.cache/page.tmp",app_dir);
     home();
     if(text_fallback()) notice("No PSP fonts found (PPSSPP without a firmware): using a basic font. In PPSSPP, install a PSP firmware for nicer text.");
+    adopt_ark_browser(); /* before the first request reads the cookie file */
     if(!page || cache_ok<0 || browser_jobs_start(cache)<0) {
         if(page) { notice("Could not start the browser worker. Press Cancel to exit."); input_state in; do { input_update(&in); frame(); } while(!exit_requested && !(in.pressed&BTN_CANCEL)); }
     } else {

@@ -18,8 +18,15 @@ Extract `Flow.zip` to your PSP storage root so that the app is at
 for the app; on Vita/Adrenaline use your configured `pspemu` folder.
 
 Coming from ARK Browser: Flow keeps its downloads, cookies and cache in its own
-folder, `PSP/GAME/Flow`. Your old downloads stay in `PSP/GAME/ARKBrowser/downloads`
-until you move or delete them, and sites you were signed in to will ask again.
+folder, `PSP/GAME/Flow`. When the Plugin Manager updates ARK Browser to Flow, it
+removes the old app, and Flow's first start moves your downloads and cookies
+from `PSP/GAME/ARKBrowser` into its own folder and deletes the old folder, so
+you stay signed in to your sites. A download whose name Flow already has gets a
+number added (`file.zip.1`). Files you added to the old folder yourself, its
+cookies if Flow already has its own, and a download that doesn't fit on the
+memory stick twice stay there. If you install Flow from the zip
+while ARK Browser is still installed, both apps stay until you delete
+`PSP/GAME/ARKBrowser`.
 
 The Full FasterARK package includes the browser. Plugin Manager installs its
 entry after the matching release is published. A draft PR artifact is installed

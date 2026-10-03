@@ -6,10 +6,11 @@ CORE = ../src/url.c ../src/document.c ../src/dom.c ../src/css.c ../src/script.c 
 QJS = quickjs cutils dtoa libregexp libunicode
 QOBJS = $(addprefix qjs_,$(addsuffix .o,$(QJS)))
 .PHONY: check clean
-check: test_browser test_engine test_view transport
+check: test_browser test_engine test_view test_adopt transport
 	./test_browser
 	./test_engine
 	./test_view
+	./test_adopt
 	python3 test_transport.py
 ../src/dom_bootstrap.h: ../src/dom_bootstrap.js ../tools/embed_js.py
 	python3 ../tools/embed_js.py $< $@
@@ -21,7 +22,9 @@ test_engine: test_engine.c $(CORE) $(QOBJS) ../src/dom_bootstrap.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_engine.c $(CORE) $(QOBJS) $(LDLIBS)
 test_view: test_view.c $(CORE) $(QOBJS) ../src/dom_bootstrap.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ test_view.c $(CORE) $(QOBJS) $(LDLIBS)
+test_adopt: test_adopt.c ../src/adopt.c ../PluginManager/src/fs.c ../PluginManager/src/util.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPM_FS_TESTING -o $@ $^ -lmbedcrypto
 transport: transport.c ../PluginManager/src/http_policy.c ../PluginManager/src/transfer.c
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl
 clean:
-	rm -f test_browser test_engine test_view transport qjs_*.o
+	rm -f test_browser test_engine test_view test_adopt transport qjs_*.o
