@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "pspsdk_ref": "6f15c154c902963864ea5c4538cc94febf8a2dad",
+  "vdpm_ref": "c9ba33bd428ba88052f79d78592f4b318a7a322b",
+  "downloads": {
+    "pspdev": {
+      "url": "https://github.com/pspdev/pspdev/releases/download/v20260901/pspdev-ubuntu-latest-x86_64.tar.gz",
+      "sha256": "074eb72c36e491686987c045428e9a8bf39fd4e67cb4cd3ef36f4a3f01f54921"
+    },
+    "psp_cfw_sdk": {
+      "url": "https://api.github.com/repos/pspdev/psp-cfw-sdk/releases/assets/595964408",
+      "sha256": "938634dbd0a2a8a44b590f368d7db09aeea5e5c324ba96ffe43a67b430574664"
+    },
+    "vitasdk": {
+      "url": "https://github.com/vitasdk/autobuilds/releases/download/sdk-snapshot-20260926.790.1/vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2",
+      "sha256": "9c00272e100f42f6b6baaaee31aa75dd314b3e93f5e78f6172151cfa41fad707"
+    },
+    "mkpsxiso": {
+      "url": "https://github.com/Lameguy64/mkpsxiso/releases/download/v2.20/mkpsxiso-2.20-Linux.deb",
+      "sha256": "705079eebc4dff95783945e577db4e2b00e23a80f2743139bdbb4263e6c9e98a"
+    },
+    "vita_libjpeg_turbo": {
+      "url": "https://api.github.com/repos/vitasdk/packages/releases/assets/513419120",
+      "sha256": "87511c384b36f944655e298140f24215f3da8b59821deddca0f6a9c5e3438b78"
+    },
+    "vita_libpng": {
+      "url": "https://api.github.com/repos/vitasdk/packages/releases/assets/513419172",
+      "sha256": "e502fac413e17b75a06f8f2a88f87daec13d83a33e9206713a0612ee245b72b8"
+    },
+    "vita_libvita2d": {
+      "url": "https://api.github.com/repos/vitasdk/packages/releases/assets/513419231",
+      "sha256": "f2688386ca15e030450223812c65beea4d1ce930a79b8a99d04f99b55ab1a455"
+    },
+    "vita_taihen": {
+      "url": "https://api.github.com/repos/vitasdk/packages/releases/assets/513419385",
+      "sha256": "afced213d9d308a665ef91809fd728614a92ec31b2fcf61cf1f6a3e98bec4014"
+    },
+    "vita_zlib": {
+      "url": "https://api.github.com/repos/vitasdk/packages/releases/assets/513419429",
+      "sha256": "f39cea16c176f93dc744597113f093db0d48adf23dd25a14ee0d2ec47df17fa6"
+    }
+  }
+}

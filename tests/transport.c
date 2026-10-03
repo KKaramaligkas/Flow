@@ -2,8 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <curl/curl.h>
-#include "../../PluginManager/src/http_policy.h"
-#include "../../PluginManager/src/transfer.h"
+#include "../PluginManager/src/http_policy.h"
+#include "../PluginManager/src/transfer.h"
 static size_t discard(char *data,size_t size,size_t count,void *ud)
 {
     (void)data;(void)ud;return size*count;

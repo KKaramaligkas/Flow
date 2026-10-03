@@ -1,0 +1,4 @@
+[submodule "PluginManager"]
+	path = PluginManager
+	url = https://github.com/KKaramaligkas/PluginManager.git
+	branch = main

@@ -1,0 +1,72 @@
+name: ARK Browser
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  PSPDEV: /usr/local/pspdev
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+      - name: Host test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcjson-dev libcurl4-openssl-dev openssl
+      - name: Sanitized tests
+        env:
+          UBSAN_OPTIONS: halt_on_error=1
+        run: make -C tests check
+      - name: Validate toolchain lock
+        run: python3 tools/ci_toolchains.py check
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+      - name: Locked toolchain settings
+        run: python3 tools/ci_toolchains.py env >> "$GITHUB_ENV"
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git clang automake autoconf zlib1g-dev python3 curl unzip zip
+      - name: Install locked pspdev
+        run: |
+          python3 tools/ci_toolchains.py download pspdev pspdev.tar.gz
+          sudo tar xf pspdev.tar.gz -C /usr/local/
+          echo $PSPDEV/bin >> $GITHUB_PATH
+      - name: Fetch locked pspsdk
+        run: |
+          git init pspsdk
+          git -C pspsdk remote add origin https://github.com/pspdev/pspsdk
+          git -C pspsdk fetch --depth 1 origin "$PSPSDK_REF"
+          git -C pspsdk checkout --detach FETCH_HEAD
+      - name: Bootstrap sdk and build
+        working-directory: pspsdk
+        run: |
+          bash ./bootstrap
+          ./configure
+          make
+          make install
+      - name: Libraries via psp-pacman
+        run: |
+          psp-pacman -Syy --noconfirm
+          psp-pacman -S --needed curl mbedtls cjson libintrafont zlib --noconfirm
+      - name: Build
+        run: make package
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ARKBrowser
+          path: dist/ARKBrowser.zip

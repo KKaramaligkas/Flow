@@ -5,6 +5,10 @@ tables, form fields and a pointer you move with the analog stick. It runs
 JavaScript with QuickJS and fetches pages over verified TLS 1.2 HTTPS. No proxy
 or remote rendering service is involved.
 
+This repository is the browser's source. It was split from
+[FasterARK powerup](https://github.com/KKaramaligkas/FasterARK_powerup), with its history, so that it can be developed on
+its own; FasterARK ships it in its Full package and its store.
+
 ## Install
 
 Extract `ARKBrowser.zip` to your PSP storage root so that the app is at
@@ -211,11 +215,19 @@ Wi-Fi hardware compatibility. PSP Street has no Wi-Fi.
 
 ## Build and validation
 
-`make browser` builds `dist/ARKBrowser.zip` with the locked PSP toolchain. The
-Full PSP package also includes it. QuickJS engine sources are vendored and
-built without OS helpers or atomics; see `vendor/quickjs/README.ark.md`.
+Clone with `git clone --recursive`: the
+[Plugin Manager](https://github.com/KKaramaligkas/PluginManager) is a
+submodule in `PluginManager/`, and the browser builds its network, text, input
+and drawing code, ships its `cacert.pem` and runs its import check.
 
-`make -C Browser/tests check` requires a native C compiler, cJSON and libcurl
+`make package` builds `dist/ARKBrowser.zip`. It needs the
+[pspdev](https://github.com/pspdev/pspdev) toolchain and
+`psp-pacman -S curl mbedtls cjson libintrafont zlib`; CI uses the same pinned
+SDK inputs as FasterARK (`tools/toolchains.json`). QuickJS engine sources are
+vendored and built without OS helpers or atomics; see
+`vendor/quickjs/README.ark.md`.
+
+`make -C tests check` requires a native C compiler, cJSON and libcurl
 development packages, Python and OpenSSL. Address/undefined-behavior sanitizers
 cover URL/HTML/history regressions, streaming boundaries and multi-MB scripts,
 CSS cascade, DOM mutations, modern syntax, promises, GET, module and resource
@@ -224,7 +236,7 @@ and line breaking, boxes, lists, tables, form fields and submission, links,
 anchors and pointer movement. The transport fixtures verify TLS 1.2, invalid
 certificates, downgrade rejection and redirect limits.
 
-Follow [the hardware checklist](../docs/hardware-release-checklist.md) on a
+Follow [the hardware checklist](https://github.com/KKaramaligkas/FasterARK_powerup/blob/main/docs/hardware-release-checklist.md) on a
 physical PSP before treating this build as device-validated.
 
 GPL-3.0 for ARK/reused code; QuickJS is MIT (included as QuickJS-LICENSE in the
