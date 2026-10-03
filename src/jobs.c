@@ -40,35 +40,27 @@ static char *fetch_same_origin(void *ud,const char *url,int max,int *len,char *e
     if (data && !browser_same_origin(doc->url,response.url)) { free(data); data=NULL; }
     return data;
 }
-static void assets(browser_document *doc)
+/* Assets come over the network, with the progress shown while loading. */
+static char *fetch_asset(void *ud,const char *url,int max,int *length,char *final)
 {
-    int requests=0; size_t script_bytes=doc->dom->script_bytes, css_bytes=0;
-    char base[BROWSER_URL_MAX]; strcpy(base,doc->url);
-    for(int i=0;i<doc->dom->count;i++) if(!strcmp(doc->dom->nodes[i].tag,"base")) {
-        char resolved[BROWSER_URL_MAX];
-        if(browser_url_resolve(base,dom_attr(&doc->dom->nodes[i],"href"),resolved,sizeof(resolved))==0) strcpy(base,resolved);
-        break;
-    }
-    for(int i=0;i<doc->dom->count&&!cancelled(NULL);i++) {
-        dom_node *n=&doc->dom->nodes[i]; int script=!strcmp(n->tag,"script");
-        int css=!strcmp(n->tag,"link")&&!strcmp(dom_attr(n,"rel"),"stylesheet");
-        if(!script&&!css)continue;
-        const char *ref=dom_attr(n,script?"src":"href"); if(!*ref||(script&&!browser_work.javascript))continue;
-        char target[BROWSER_URL_MAX],err[256]; int limit=script?512*1024:64*1024;
-        size_t left=script?1024*1024-script_bytes:128*1024-css_bytes;
-        if(requests++>=16||!left||browser_url_resolve(base,ref,target,sizeof(target))<0||
-           (browser_url_secure(doc->url)&&!browser_url_secure(target))||(script&&!browser_same_origin(doc->url,target))) { doc->assets_omitted++; continue; }
-        if((size_t)limit>left)limit=(int)left;
-        net_response response;int length=0;
-        char *data=net_get_info(target,limit,&length,&response,progress,NULL,err,sizeof(err));
-        if(data&&((browser_url_secure(doc->url)&&!browser_url_secure(response.url))||(script&&!browser_same_origin(doc->url,response.url)))) { free(data); data=NULL; }
-        if(!data||memchr(data,0,(size_t)length)) {free(data);doc->assets_omitted++;continue;}
-        if(css && (size_t)length+1>DOM_BYTES_MAX-doc->dom->bytes) {free(data);doc->assets_omitted++;continue;}
-        if(script)script_bytes+=(size_t)length;else{css_bytes+=(size_t)length;doc->dom->bytes+=(size_t)length+1;}
-        free(n->text); n->text=data;
-        if(script)dom_set_attr(doc->dom,i,"src",response.url);
-    }
+    (void)ud; net_response response; char err[256];
+    char *data=net_get_info(url,max,length,&response,progress,NULL,err,sizeof(err));
+    if(data) pm_strlcpy(final,response.url,BROWSER_URL_MAX);
+    return data;
 }
+#ifdef PM_AUTOTEST
+/* Test builds log how long each step of a page load takes. */
+static unsigned phase_start;
+static void phase(const char *name)
+{
+    unsigned now=sceKernelGetSystemTimeLow();
+    FILE *f=fopen("ms0:/arkb_timing.txt","a");
+    if(f){fprintf(f,"%s %u ms\n",name,(now-phase_start)/1000);fclose(f);}
+    phase_start=sceKernelGetSystemTimeLow();
+}
+#else
+#define phase(name) ((void)0)
+#endif
 static int worker(SceSize args, void *argp)
 {
     (void)args; (void)argp;
@@ -79,30 +71,40 @@ static int worker(SceSize args, void *argp)
                                             browser_work.error,sizeof(browser_work.error));
         } else {
             net_response response;
+#ifdef PM_AUTOTEST
+            phase_start=sceKernelGetSystemTimeLow();
+#endif
             int length=browser_work.post?
                 net_post_file(browser_work.url,browser_work.post,page_cache,BROWSER_PAGE_MAX,&response,progress,NULL,
                               browser_work.error,sizeof(browser_work.error)):
                 net_get_file(browser_work.url,page_cache,BROWSER_PAGE_MAX,&response,progress,NULL,
                              browser_work.error,sizeof(browser_work.error));
             browser_work.result=-1;
+            phase("download");
             if(length>=0 && !cancelled(NULL)) {
                 browser_document *doc=calloc(1,sizeof(*doc)); fs_file f=fs_open(page_cache,FS_READ);
                 if(!doc) snprintf(browser_work.error,sizeof(browser_work.error),"Not enough memory to open the page.");
-                else if(f<0 || browser_document_read(doc,read_page,&f,response.url,response.content_type,cancelled,NULL,
+                else if(f<0 || browser_document_load(doc,read_page,&f,response.url,response.content_type,cancelled,NULL,
                                               browser_work.error,sizeof(browser_work.error))<0) {
                     browser_document_free(doc); free(doc); doc=NULL;
                 }
                 if(f>=0)fs_close(f);
+                phase("parse");
                 if(doc) {
                     doc->source_bytes=(size_t)length;
                     doc->scripting=browser_work.javascript;
-                    assets(doc);
-                    if(browser_document_render(doc,browser_work.error,sizeof(browser_work.error))<0) {
+                    browser_assets(doc,browser_work.javascript,fetch_asset,NULL,cancelled,NULL);
+                    phase("assets");
+                    /* Scripts first: a page they change is styled once, by them. */
+                    if(browser_work.javascript)browser_script_run(doc,fetch_same_origin,doc,cancelled,NULL,30000,
+                                                    browser_work.error,sizeof(browser_work.error));
+                    phase("scripts");
+                    if(doc->rendered!=doc->dom&&browser_document_render(doc,browser_work.error,sizeof(browser_work.error))<0) {
                         browser_document_free(doc);free(doc);
                     } else {
-                        if(browser_work.javascript)browser_script_run(doc,fetch_same_origin,doc,cancelled,NULL,30000,
-                                                        browser_work.error,sizeof(browser_work.error));
+                        phase("render");
                         if(!cancelled(NULL)) browser_build_view(doc);
+                        phase("view");
                         browser_work.page=doc;browser_work.result=0;
                     }
                 }

@@ -1,7 +1,7 @@
 #ifndef ARKB_DOM_H
 #define ARKB_DOM_H
 #include <stddef.h>
-#define DOM_NODES_MAX 2048
+#define DOM_NODES_MAX 16384     /* the node array grows to this as a page needs */
 #define DOM_BYTES_MAX (768 * 1024)
 #define DOM_DEPTH_MAX 64
 #define DOM_SOURCE_MAX (8 * 1024 * 1024)
@@ -15,7 +15,7 @@ typedef struct {
 } dom_node;
 typedef struct {
     dom_node *nodes;
-    int count, shortened, html;
+    int count, capacity, shortened, html;
     size_t bytes, source_bytes, script_bytes;
 } browser_dom;
 typedef int (*dom_read_fn)(void *, char *, size_t);

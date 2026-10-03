@@ -153,6 +153,12 @@ static void draw_control(const browser_view *v,const view_item *it,int x,int y)
         if(c->checked) gfx_circle(x+w/2.0f,y+h/2.0f,w/2.0f-3,ink,1);
         return;
     case CONTROL_SUBMIT: case CONTROL_RESET: case CONTROL_BUTTON: case CONTROL_IMAGE: case CONTROL_FILE:
+        if(it->flags&CONTROL_PLAIN) {
+            /* styled as text by the page */
+            if(hot) gfx_rect(x,y,w,h,RGBA(60,130,255,40));
+            text_print(x+1,y,view_string(v,c->label),it->scale,c->disabled?RGB(150,150,150):it->color,(it->flags&2)?TEXT_BOLD:0);
+            return;
+        }
         gfx_gradient(x,y,w,h,hot?RGB(232,242,255):RGB(250,250,250),hot?RGB(200,220,250):RGB(220,220,220));
         frame_rect(x,y,w,h,1,border);
         clip_page(x+2,y,w-4,h);

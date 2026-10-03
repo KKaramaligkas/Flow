@@ -60,6 +60,13 @@ static void documents(void)
     d=parse("<p><a href='next'>Unclosed","text/html");CHECK(d->count==1);CHECK(strstr(d->text,"Unclosed [1]"));release(d);
     d=parse("a &amp; b\n  indented\nα","text/plain");SAME(d->text,"a &amp; b\n  indented\nα");release(d);
     d=parse("<pre>a\n  b</pre>","text/html");SAME(d->text,"a\n  b\n");release(d);
+    /* Named references beyond the basic five; soft hyphens and zero-width
+       characters vanish; unknown names stay as written. */
+    d=parse("<p>Read&nbsp;&rsaquo; &laquo;caf&eacute;&raquo; &rarr; &Omega;&sigma;&sigmaf; &hearts; hy&shy;phen zero&#x200b;width &bogus; &frac12;</p>"
+            "<a href='a?x=&rarr;&amp;y=1' title='&ldquo;Q&rdquo;'>t</a>","text/html");
+    CHECK(strstr(d->text,"Read › «café» → Ωσς ♥ hyphen zerowidth &bogus; ½")!=NULL);
+    for(int i=0;i<d->dom->count;i++)if(!strcmp(d->dom->nodes[i].tag,"a"))SAME(dom_attr(&d->dom->nodes[i],"title"),"“Q”");
+    release(d);
     d=parse("<p>caf\xe9</p>","text/html; charset=iso-8859-1");CHECK(strstr(d->text,"café"));release(d);
     d=parse("<p>&#0; &#xD800; &#x110000; &#999999999999999999999;</p>","text/html");CHECK(strlen(d->text)<100);release(d);
     d=parse("<script>never closes", "text/html");CHECK(strstr(d->text,"no readable text"));release(d);

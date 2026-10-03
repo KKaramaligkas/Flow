@@ -14,6 +14,7 @@
 #define LINE        17.0f
 #define FIELD_H     17
 #define DEFAULT_LINK 0xffee0000u    /* #0000EE */
+#define TEXT_SCALE  0.64f           /* body text (16 CSS pixels) */
 
 /* A piece of the line being built: a run of text, or a box (form field,
    image) whose items were laid out at (0, 0) and move when the line ends. */
@@ -50,6 +51,8 @@ typedef struct {
     float marker_scale;
     uint32_t marker_color;
     int depth, scripting, failed;
+    const char *name;           /* an icon link's name, shown in place of its content */
+    uint32_t backdrop;          /* the background drawn behind the open block (0: the paper) */
 } builder;
 
 static int eq(const char *a, const char *b)
@@ -121,13 +124,35 @@ static float descent(float scale) { return (LINE - ASCENT) * scale; }
 
 /* ---- lines ---- */
 
+/* Roughly how bright a colour looks (0..1000): gamma 2 in place of the
+   sRGB curve, with the eye's weights for red, green and blue. */
+static int brightness(uint32_t c)
+{
+    unsigned r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
+    return (int)((2126u * r * r + 7152u * g * g + 722u * bl * bl) / 650250u);
+}
+
+/* Text in a colour that vanishes into what is behind it (white text meant
+   for a picture we don't draw, transparent text over a gradient) is shown
+   dark on a light background and light on a dark one. Links keep looking
+   like links. */
+static uint32_t readable(builder *b, uint32_t color, uint32_t background, int link)
+{
+    uint32_t under = background ? background : b->backdrop ? b->backdrop : b->v->paper;
+    int text = brightness(color), back = brightness(under);
+    int light = text > back ? text : back, dark = text > back ? back : text;
+    if (color >> 24 && (light + 50) * 10 >= (dark + 50) * 15) return color;     /* contrast ratio 1.5 or more */
+    if (back > 180) return link >= 0 ? DEFAULT_LINK : 0xff202020u;
+    return link >= 0 ? 0xfff8b48au : 0xffe8e8e8u;
+}
+
 static void place_marker(builder *b, int line_x, int top, float asc)
 {
     if (!b->marker) return;
     float s = b->marker_scale;
     if (b->marker == 1) {
         int size = s > 0.7f ? 5 : 4;
-        view_item it = item(ITEM_BULLET, line_x - 10, top + (int)(asc - ascent(s) + (LINE * s - size) / 2), size, size, b->marker_color);
+        view_item it = item(ITEM_BULLET, line_x - 10, top + (int)(asc - ascent(s) + (LINE * s - size) / 2), size, size, readable(b, b->marker_color, 0, -1));
         add_item(b, it);
     } else {
         char number[16];
@@ -135,7 +160,7 @@ static void place_marker(builder *b, int line_x, int top, float asc)
         int at = store(b, number, (size_t)n, 0);
         float w = width_of(b, number, n, s, 0);
         if (at >= 0) {
-            view_item it = item(ITEM_TEXT, line_x - 4 - (int)w, top + (int)(asc - ascent(s)), (int)w + 1, (int)(LINE * s), b->marker_color);
+            view_item it = item(ITEM_TEXT, line_x - 4 - (int)w, top + (int)(asc - ascent(s)), (int)w + 1, (int)(LINE * s), readable(b, b->marker_color, 0, -1));
             it.text = at; it.length = n; it.scale = s;
             add_item(b, it);
         }
@@ -184,7 +209,7 @@ static void flush_line(builder *b)
                 b->v->items[k].y += py;
             }
         } else if (p[i].length) {
-            view_item it = item(ITEM_TEXT, px, py, (int)(p[i].width + 0.99f), (int)(LINE * p[i].scale + 0.5f), p[i].color);
+            view_item it = item(ITEM_TEXT, px, py, (int)(p[i].width + 0.99f), (int)(LINE * p[i].scale + 0.5f), readable(b, p[i].color, p[i].background, p[i].link));
             it.text = p[i].text; it.length = p[i].length; it.scale = p[i].scale; it.flags = (short)p[i].flags;
             it.link = (short)p[i].link; it.control = (short)p[i].control;
             add_item(b, it);
@@ -320,6 +345,14 @@ static void add_word(builder *b, const char *word, int n, browser_style st)
     if (n >= (int)sizeof(copy)) n = (int)sizeof(copy) - 1;
     memcpy(copy, word, (size_t)n);
     transform(copy, n, st.flags);
+    if (!l->space && l->count && b->link >= 0) {
+        /* Links that touch, as in a menu spaced out by CSS, keep a space apart. */
+        const piece *last = &b->pieces[l->first + l->count - 1];
+        if (!last->box && last->link >= 0 && last->link != b->link) {
+            l->space = 1; l->space_style = st; l->space_style.flags &= ~(CSS_UNDERLINE | CSS_STRIKE);
+            l->space_link = -1; l->space_control = -1;
+        }
+    }
     browser_style gap = l->space_style;
     float space = l->space && l->count ? width_of(b, " ", 1, gap.scale, gap.flags) : 0;
     float width = width_of(b, copy, n, st.scale, st.flags);
@@ -392,6 +425,11 @@ static void add_box(builder *b, int first, int w, int h, float base)
 {
     line_state *l = b->line;
     int count = b->v->item_count - first;
+    if (!l->space && l->count) {
+        /* A field or picture right after a link or another field. */
+        const piece *last = &b->pieces[l->first + l->count - 1];
+        if ((!last->box && last->link >= 0) || (last->box && last->count > 0)) l->space = 1;
+    }
     if (l->count && l->used + (l->space ? 4 : 0) + w > l->width) flush_line(b);
     if (l->space && l->count) {
         piece *gap = new_piece(b);
@@ -490,6 +528,38 @@ static void add_options(builder *b, view_control *c, int node, int depth)
     }
 }
 
+/* aria-label, title, or the alt or aria-label of a picture inside. */
+static void accessible_name(const browser_dom *dom, int node, char *out, size_t size)
+{
+    const dom_node *n = &dom->nodes[node];
+    const char *name = *dom_attr(n, "aria-label") ? dom_attr(n, "aria-label") : dom_attr(n, "title");
+    snprintf(out, size, "%s", name);
+    for (int c = n->first; c >= 0 && !*out; c = dom->nodes[c].next) {
+        const dom_node *k = &dom->nodes[c];
+        if (is(k, "img")) snprintf(out, size, "%s", dom_attr(k, "alt"));
+        else if (is(k, "svg")) snprintf(out, size, "%s", *dom_attr(k, "aria-label") ? dom_attr(k, "aria-label") : dom_attr(k, "title"));
+        else if (k->tag[0] != '#') accessible_name(dom, c, out, size);
+    }
+    collapse_spaces(out);
+}
+/* Whether an element shows anything of its own: text, a picture with a
+   description, a field. */
+static int has_content(const browser_dom *dom, int node, int depth)
+{
+    for (int c = dom->nodes[node].first; c >= 0 && depth < 16; c = dom->nodes[c].next) {
+        const dom_node *k = &dom->nodes[c];
+        if (!strcmp(k->tag, "#text")) { for (const char *p = k->text ? k->text : ""; *p; p++) if (!isspace((unsigned char)*p)) return 1; continue; }
+        if ((is(k, "img") && *dom_attr(k, "alt")) || is(k, "input") || is(k, "select") || is(k, "textarea") || is(k, "button")) return 1;
+        if (has_content(dom, c, depth + 1)) return 1;
+    }
+    return 0;
+}
+/* An icon's name is text, not as big as the icon its font size made. */
+static browser_style name_style(browser_style st)
+{
+    if (st.scale > TEXT_SCALE) st.scale = TEXT_SCALE;
+    return st;
+}
 static int has_attr(const dom_node *n, const char *name)
 {
     for (int i = 0; i < n->attribute_count; i++) if (eq(n->attributes[i].name, name)) return 1;
@@ -546,7 +616,10 @@ static void register_forms(builder *b)
         if (c->kind == CONTROL_SUBMIT || c->kind == CONTROL_RESET || c->kind == CONTROL_BUTTON) {
             if (is(n, "button")) { text_content(dom, i, label, sizeof(label), 0); collapse_spaces(label); }
             else snprintf(label, sizeof(label), "%s", dom_attr(n, "value"));
-            if (!*label) snprintf(label, sizeof(label), "%s", c->kind == CONTROL_RESET ? "Reset" : c->kind == CONTROL_SUBMIT ? "Submit" : "Button");
+            /* An icon button: its accessible name. A script's button
+               without one isn't shown (label left empty). */
+            if (!*label) accessible_name(dom, i, label, sizeof(label));
+            if (!*label && c->kind != CONTROL_BUTTON) snprintf(label, sizeof(label), "%s", c->kind == CONTROL_RESET ? "Reset" : "Submit");
         } else if (c->kind == CONTROL_IMAGE) snprintf(label, sizeof(label), "%s", *dom_attr(n, "alt") ? dom_attr(n, "alt") : "Submit");
         else if (c->kind == CONTROL_FILE) snprintf(label, sizeof(label), "Choose file (not supported)");
         else snprintf(label, sizeof(label), "%s", *dom_attr(n, "placeholder") ? dom_attr(n, "placeholder") : dom_attr(n, "aria-label"));
@@ -589,6 +662,7 @@ static int field_size(builder *b, int node, const browser_box *box, int room, in
     const dom_node *n = &b->dom->nodes[node];
     int w, h = FIELD_H;
     float s = 0.6f;
+    if (c->kind == CONTROL_BUTTON && !*view_string(v, c->label)) return 0;
     switch (c->kind) {
     case CONTROL_HIDDEN: return 0;
     case CONTROL_CHECKBOX: case CONTROL_RADIO: w = h = 11; break;
@@ -619,8 +693,11 @@ static int field_size(builder *b, int node, const browser_box *box, int room, in
         break;
     }
     }
+    int label_width = w;
     if (box->width > 0) w = box->width;
     else if (box->width < 0 && room > 0) w = room * -box->width / 100;
+    /* A button sized by CSS for an icon still shows its whole name. */
+    if ((c->kind == CONTROL_SUBMIT || c->kind == CONTROL_RESET || c->kind == CONTROL_BUTTON || c->kind == CONTROL_IMAGE) && w < label_width) w = label_width;
     if (box->height > 0 && c->kind != CONTROL_CHECKBOX && c->kind != CONTROL_RADIO) h = clampi(box->height, 11, 200);
     *height = h;
     return w > 11 ? w : 11;
@@ -635,9 +712,20 @@ static void field(builder *b, int node, browser_style st, browser_box *box)
     float s = 0.6f;
     w = clampi(w, 11, l->width > 11 ? l->width : 11);
     view_control *c = &v->controls[index];
+    int plain = (c->kind == CONTROL_SUBMIT || c->kind == CONTROL_RESET || c->kind == CONTROL_BUTTON) &&
+                ((box->plain & 1) || ((box->plain & 2) && (box->plain & 4)));
+    if (plain) {
+        /* A button styled as text (code tokens, tabs, menus): sized and drawn as its text. */
+        const char *label = view_string(v, c->label);
+        if (is(&b->dom->nodes[node], "button") && !has_content(b->dom, node, 0)) st = name_style(st);
+        s = st.scale;
+        w = clampi((int)width_of(b, label, (int)strlen(label), s, st.flags) + 2, 4, l->width > 4 ? l->width : 4);
+        h = (int)(LINE * s + 0.5f);
+    }
     int first = v->item_count;
     view_item it = item(ITEM_CONTROL, 0, 0, w, h, st.color);
     it.control = (short)index; it.link = (short)b->link; it.scale = s;
+    if (plain) { it.flags = CONTROL_PLAIN | (short)(st.flags & CSS_BOLD ? 2 : 0); it.color = readable(b, st.color, 0, b->link); }
     int at = add_item(b, it);
     if (at < 0) return;
     c->item = at;
@@ -647,11 +735,14 @@ static void field(builder *b, int node, browser_style st, browser_box *box)
 /* The size of an image's box (0 when it isn't shown), fitted into `room`. */
 static int image_size(builder *b, int node, const browser_box *box, int room, int *height)
 {
-    const char *alt = dom_attr(&b->dom->nodes[node], "alt");
+    const dom_node *n = &b->dom->nodes[node];
+    const char *alt = dom_attr(n, "alt");
     int w = box->width > 0 ? box->width : box->width < 0 && room > 0 ? room * -box->width / 100 : 0;
     int h = box->height > 0 ? box->height : 0;
+    /* Without the picture, decoration is noise: alt="" marks it, and an
+       icon (up to 25 CSS pixels) without a description is one. */
+    if (!*alt && (has_attr(n, "alt") || (w <= 15 && h <= 15))) return 0;
     if (!w && !h) {
-        if (!*alt) return 0;    /* size unknown and nothing to say: decoration */
         w = (int)width_of(b, alt, (int)strlen(alt), 0.55f, 0) + 8;
         h = FIELD_H;
     }
@@ -761,7 +852,8 @@ static void block(builder *b, int node, browser_style st, browser_box *box, int 
         return;
     }
     int top = *y, background = -1;
-    if (st.background) background = add_item(b, item(ITEM_RECT, x, top, w, 0, st.background));
+    uint32_t backdrop = b->backdrop;
+    if (st.background) { background = add_item(b, item(ITEM_RECT, x, top, w, 0, st.background)); b->backdrop = st.background; }
     int bt = box->border[0], bb = box->border[2], bl = box->border[3], br = box->border[1];
     int pt = box->padding[0], pb = box->padding[2], pl = box->padding[3], pr = box->padding[1];
     if (bt + pt > 0) { *y += bt + pt; b->collapse = 0; }
@@ -785,10 +877,20 @@ static void block(builder *b, int node, browser_style st, browser_box *box, int 
         b->marker_number = b->list_number ? (*b->list_number)++ : 1;
         b->marker_color = st.color; b->marker_scale = st.scale;
     }
+    if (b->name) {
+        /* An icon's box is sized for the icon: its name may run past it
+           rather than break up, while it fits on the screen. */
+        browser_style ns = name_style(st);
+        int need = (int)width_of(b, b->name, (int)strlen(b->name), ns.scale, ns.flags) + 1;
+        if (need > line.width && inner_x + need <= v->width - 4) line.width = need;
+        add_text(b, b->name, ns);
+        b->name = NULL;
+    }
     if (is(n, "table") || box->display == DISPLAY_TABLE) table(b, node, st, inner_x, inner_w);
     else children(b, node, st);
     flush_line(b);
     if (b->marker && is(n, "li")) { place_marker(b, inner_x, *y, ascent(st.scale)); *y += (int)(LINE * st.scale); }
+    b->backdrop = backdrop;
     b->line = outer;
     b->list_kind = list_kind; b->list_number = list_number;
     if (box->height > 0 && *y - content_top < box->height) *y = content_top + box->height;
@@ -875,12 +977,15 @@ static void element(builder *b, int node, browser_style parent)
         return;
     }
     int link = b->link, label = b->label;
+    char icon[96] = "";
     if (is(n, "a") && *dom_attr(n, "href") && b->v->link_count < VIEW_LINKS_MAX) {
         char target[BROWSER_URL_MAX];
         if (browser_url_resolve(b->base, dom_attr(n, "href"), target, sizeof(target)) == 0) {
             int at = store_string(b, target);
             if (at >= 0) { b->v->links[b->v->link_count].url = at; b->link = b->v->link_count++; }
         }
+        /* An icon link (a logo, GitHub, Menu) shows its name. */
+        if (!has_content(dom, node, 0)) accessible_name(dom, node, icon, sizeof(icon));
     }
     if (is(n, "label")) {
         int target = find_id(dom, dom_attr(n, "for"));
@@ -892,7 +997,9 @@ static void element(builder *b, int node, browser_style parent)
         flush_line(b);
         int x = b->line->x, width = b->line->width;
         if (inline_block && !box.width) box.width = (short)shrink_width(b, node, st, &box);
+        if (*icon) b->name = icon;
         block(b, node, st, &box, x, width);
+        b->name = NULL;
     } else {
         /* An inline element: its margins and padding take room in the line,
            its background goes behind its text, and an inline parent's
@@ -904,6 +1011,7 @@ static void element(builder *b, int node, browser_style parent)
         int pl = clampi(box.padding[3] + box.border[3], 0, 30), pr = clampi(box.padding[1] + box.border[1], 0, 30);
         add_gap(b, ml, parent.background, st);
         add_gap(b, pl, st.background, st);
+        if (*icon) add_text(b, icon, name_style(st));
         children(b, node, st);
         add_gap(b, pr, st.background, st);
         add_gap(b, mr, parent.background, st);
@@ -1060,6 +1168,8 @@ static void table(builder *b, int node, browser_style st, int x, int width)
         if (rs.hidden || rbox.hide || rbox.display == DISPLAY_NONE) continue;
         int row_top = *y, row_h = 0, cx = x + spacing, column = 0;
         int row_background = rs.background ? add_item(b, item(ITEM_RECT, x, row_top, width, 0, rs.background)) : -1;
+        uint32_t backdrop = b->backdrop;
+        if (rs.background) b->backdrop = rs.background;
         struct { int background, first, last, height, valign, frame; } cells[COLUMNS_MAX];
         int cell_count = 0;
         for (int c = dom->nodes[rows[r]].first; c >= 0 && column < columns; c = dom->nodes[c].next) {
@@ -1080,8 +1190,11 @@ static void table(builder *b, int node, browser_style st, int x, int width)
             line_state *outer = b->line;
             int *outer_y = b->y;
             b->line = &line; b->y = &cell_y; b->collapse = 1000;   /* no margin above the first block */
+            uint32_t row_backdrop = b->backdrop;
+            if (cs.background) b->backdrop = cs.background;
             children(b, c, cs);
             flush_line(b);
+            b->backdrop = row_backdrop;
             b->line = outer; b->y = outer_y;
             int height = cell_y + pad + box.padding[2] - row_top;
             if (box.height > height) height = box.height;
@@ -1109,6 +1222,7 @@ static void table(builder *b, int node, browser_style st, int x, int width)
             }
         }
         if (row_background >= 0) b->v->items[row_background].h = row_h;
+        b->backdrop = backdrop;
         *y = row_top + row_h + spacing;
     }
     b->collapse = 0;
@@ -1160,7 +1274,7 @@ int browser_view_build(browser_view *v, const browser_document *doc, int width, 
        a <body> element need one too. */
     line_state line = { .x = 4, .width = width - 8 };
     b->line = &line; b->y = &y;
-    browser_style initial = { .color = 0xff000000, .link = DEFAULT_LINK, .scale = 0.64f, .pre = !doc->dom->html };
+    browser_style initial = { .color = 0xff000000, .link = DEFAULT_LINK, .scale = TEXT_SCALE, .pre = !doc->dom->html };
     if (!b->failed) {
         if (doc->dom->html) children(b, 0, initial);
         else {

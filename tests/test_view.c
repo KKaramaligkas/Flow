@@ -315,9 +315,99 @@ static void plain_text(void)
     drop(p);
 }
 
+/* What real sites need to stay readable without their scripts. */
+static void readability(void)
+{
+    page *p = load("<p><a href=/a>Sign in</a><a href=/b>Sign up</a> and<a href=/c>more</a></p><p><a href=/x>Home</a><input type=submit value=Go></p>"
+                   "<form><button aria-label='Open menu' style='width:20px'><svg></svg></button><button type=button><svg></svg></button><button><img alt=Search></button></form>"
+                   "<p><a href='https://github.com/x' aria-label=GitHub><svg></svg></a> <a href=/home title=Home><img src=logo.png></a>"
+                   " <a href=/blank><img src=x.png></a><a style='display:block' href=/d aria-label=Docs><svg></svg></a></p>", "https://example.org/", 0);
+    browser_view *v = &p->view;
+    sane(v);
+    const view_item *in = find_text(v, "Sign in"), *up = find_text(v, "Sign up"), *and_text = find_text(v, " and"), *more = find_text(v, "more");
+    CHECK(in && up && in->y == up->y && up->x >= in->x + in->w + 5);
+    CHECK(and_text && more && more->x <= and_text->x + and_text->w + 1);   /* text joined to a link stays joined */
+    const view_item *home = find_text(v, "Home");
+    int go = -1, menu = -1, script_button = -1, search = -1;
+    for (int i = 0; i < v->control_count; i++) {
+        const char *label = view_string(v, v->controls[i].label);
+        if (!strcmp(label, "Go")) go = i; else if (!strcmp(label, "Open menu")) menu = i; else if (!strcmp(label, "Search")) search = i;
+        else if (v->controls[i].kind == CONTROL_BUTTON) script_button = i;
+    }
+    CHECK(home && go >= 0 && v->controls[go].item >= 0 && v->items[v->controls[go].item].x >= home->x + home->w + 3);
+    CHECK(menu >= 0 && v->controls[menu].item >= 0 && search >= 0 && v->controls[search].item >= 0);
+    if (menu >= 0 && v->controls[menu].item >= 0) CHECK(v->items[v->controls[menu].item].w >= 50);   /* not the 12 pixels its CSS gives the icon */
+    CHECK(script_button >= 0 && v->controls[script_button].item < 0);
+    const view_item *github = find_text(v, "GitHub"), *home_logo = NULL, *docs = find_text(v, "Docs");
+    for (int i = 0; i < v->item_count; i++) if (v->items[i].kind == ITEM_TEXT && v->items[i].length == 4 && !strncmp(v->text + v->items[i].text, "Home", 4) && v->items[i].y != home->y) home_logo = &v->items[i];
+    CHECK(github && github->link >= 0 && !strcmp(view_string(v, v->links[github->link].url), "https://github.com/x"));
+    CHECK(home_logo && home_logo->link >= 0 && docs && docs->link >= 0);
+    drop(p);
+    /* A closed <details> shows its summary; decorative pictures leave no box. */
+    p = load("<details><summary>More</summary><p>hidden text</p></details><details open><summary>Open</summary><p>shown text</p></details>"
+             "<p><img src=a.png alt='' width=200 height=100><img src=i.png width=16 height=16><img src=b.png alt=Chart width=200 height=100>"
+             "<img src=c.png width=300 height=200></p>", "https://example.org/", 0);
+    v = &p->view;
+    CHECK(find_text(v, "More") && !find_text(v, "hidden text") && find_text(v, "Open") && find_text(v, "shown text"));
+    CHECK(count_kind(v, ITEM_IMAGE) == 2);
+    drop(p);
+    /* A button the page styles as text is drawn as its text. */
+    p = load("<style>.t{border:none;background:none;color:#cc0000}</style><p><button class=t type=button>createServer</button><button type=button>Plain</button>"
+             "<button class=t type=button aria-label=Chat style='font-size:24px'><svg></svg></button> <a href=/g aria-label=GitHub style='font-size:30px'><svg></svg></a></p>", "https://example.org/", 0);
+    v = &p->view;
+    int token = -1, normal = -1, chat = -1;
+    for (int i = 0; i < v->control_count; i++) {
+        const char *label = view_string(v, v->controls[i].label);
+        if (!strcmp(label, "createServer")) token = i; else if (!strcmp(label, "Plain")) normal = i; else if (!strcmp(label, "Chat")) chat = i;
+    }
+    CHECK(token >= 0 && normal >= 0 && v->controls[token].item >= 0 && v->controls[normal].item >= 0);
+    if (token >= 0 && normal >= 0 && v->controls[token].item >= 0 && v->controls[normal].item >= 0) {
+        const view_item *a = &v->items[v->controls[token].item], *b = &v->items[v->controls[normal].item];
+        CHECK((a->flags & CONTROL_PLAIN) && !(b->flags & CONTROL_PLAIN) && a->color == 0xff0000cc && a->h <= 11);
+    }
+    /* An icon's name is body text, whatever size the icon's font made it. */
+    CHECK(chat >= 0 && v->controls[chat].item >= 0 && v->items[v->controls[chat].item].scale <= 0.641f);
+    const view_item *named = find_text(v, "GitHub");
+    CHECK(named && named->scale <= 0.641f);
+    drop(p);
+    /* ...and runs past the box sized for the icon rather than break up. */
+    p = load("<div style='width:40px'><a href=/ aria-label='Atlassian logo' style='display:block'><svg></svg></a></div>", "https://example.org/", 0);
+    v = &p->view;
+    CHECK(find_text(v, "Atlassian logo") != NULL);
+    drop(p);
+    /* Text that would vanish into what is behind it: white text on a
+       picture we don't draw, transparent text over a gradient. A gradient
+       shows as a colour; colours that show are kept. */
+    p = load("<style>.hero{background:url(hero.png) center/cover;padding:20px}.hero h1{color:#fff}.dark{background:#101010;color:#111}"
+             ".band{background:linear-gradient(90deg,#1d63ed 0%,#0b214a 100%);color:#fff}.fade{background-image:radial-gradient(circle,rgba(0,0,0,.1),transparent)}"
+             ".clip{background:linear-gradient(#f00,#00f);-webkit-background-clip:text;color:transparent}</style>"
+             "<div class=hero><h1>Isolated</h1><a href=/x style='color:#fff'>Explore</a></div><div class=dark>Night<ul><li>Item</li></ul></div>"
+             "<div class=band>Banner</div><div class=fade><span style='color:#999'>Grey</span></div><p><span class=clip>Rainbow</span></p>"
+             "<table><tr><td style='background:#000;color:#fff'>Cell</td><td style='color:#fefefe'>Pale</td></tr></table>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *isolated = find_text(v, "Isolated"), *explore = find_text(v, "Explore"), *night = find_text(v, "Night"), *item = find_text(v, "Item");
+    const view_item *banner = find_text(v, "Banner"), *grey = find_text(v, "Grey"), *rainbow = find_text(v, "Rainbow"), *cell = find_text(v, "Cell"), *pale = find_text(v, "Pale");
+    CHECK(isolated && isolated->color == 0xff202020);
+    CHECK(explore && explore->color == 0xffee0000);     /* still a link */
+    CHECK(night && night->color == 0xffe8e8e8 && item && item->color == 0xffe8e8e8);
+    int band = 0, bullet = 0, behind_rainbow = 0;
+    for (int i = 0; i < v->item_count; i++) {
+        if (v->items[i].kind == ITEM_RECT && rainbow && v->items[i].y == rainbow->y) behind_rainbow = 1;
+        if (v->items[i].kind == ITEM_RECT && banner && v->items[i].y <= banner->y && v->items[i].y + v->items[i].h >= banner->y + banner->h &&
+            v->items[i].color == 0xff9b4214) band = 1;   /* the average of #1d63ed and #0b214a */
+        if (v->items[i].kind == ITEM_BULLET && item && v->items[i].y >= item->y && v->items[i].y < item->y + item->h) bullet = v->items[i].color == 0xffe8e8e8;
+    }
+    CHECK(band && banner && banner->color == 0xffffffff);
+    CHECK(bullet);
+    CHECK(grey && grey->color == 0xff999999);
+    CHECK(rainbow && rainbow->color == 0xff7f007f && !behind_rainbow);   /* the gradient's colour, without a box */
+    CHECK(cell && cell->color == 0xffffffff && pale && pale->color == 0xff202020);
+    drop(p);
+}
+
 int main(void)
 {
-    flow(); boxes(); tables(); forms(); navigation(); plain_text();
+    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability();
     printf("view: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

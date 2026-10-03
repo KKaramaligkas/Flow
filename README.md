@@ -19,8 +19,12 @@ install the browser automatically. This application does not flash firmware.
 
 The user reported that 0.1 works on PSP-3000 with CERN and CNN Lite. That report
 covers the original browser. This 0.3 build was tested in PPSSPP against local
-test pages (search, sign-in and article pages); it still needs testing on a
-real PSP, and host tests do not prove that modern sites work.
+test pages (search, sign-in and article pages) and against saved copies of
+twelve real sites (pkg.go.dev, rubygems.org, nodejs.org, gitlab.com,
+hub.docker.com, jsr.io, packagist.org, nuget.org, bitbucket.org, ubuntu.com,
+apache.org and pypi.org), served with their stylesheets and scripts from a local
+HTTPS server. It still needs testing on a real PSP and over live connections.
+Pages that JavaScript builds entirely, such as GitLab's, show little.
 
 ## Controls
 
@@ -73,7 +77,11 @@ boxes appear in reading order. Flex and grid containers are laid out as normal
 blocks; `justify-content` aligns their inline content. Images are not
 downloaded: they show as boxes with their description (`alt` text), at their
 size when the page gives it. Italic text is drawn upright, and CSS font
-families are not used.
+families are not used. HTML 4's named characters (`&rsaquo;`, `&eacute;`,
+`&rarr;`...) and HTML 5's common ones are decoded; soft hyphens and zero-width
+characters are dropped. A link or button showing only an icon shows its name
+(`aria-label`, `title` or the picture's description) instead, and links that
+touch, as in menus spaced out by CSS, are kept a space apart.
 
 ## Forms and cookies
 
@@ -107,37 +115,64 @@ functions, classes, destructuring, template strings, BigInt, promises and
 async/await. Inline and same-origin external scripts and ES modules run during
 loading, with bounded same-origin module imports and promise jobs.
 
-The reader DOM implements basic element/text creation, querySelector(All), ID,
-tag and class queries, textContent, innerText, a limited innerHTML fragment
-parser, append/remove/insert, attributes, classList and inline style changes.
-DOMContentLoaded and load handlers run before the page is laid out. `fetch`
-supports same-origin GET with text/JSON promise responses. Requests and redirects
-must remain same-origin; they carry the browser's cookies, but `document.cookie`,
-authorization and custom headers are absent.
+The reader DOM implements element, text, comment and fragment creation,
+querySelector(All), matches and closest, ID, tag, class and name queries,
+parent/child/sibling navigation, textContent, innerText, a limited innerHTML
+fragment parser, insertAdjacentHTML, append/prepend/before/after/remove/replace,
+cloneNode, attributes, dataset, classList and inline style changes, plus
+`document.documentElement`, `head` and `body`. DOMContentLoaded and load
+handlers run before the page is laid out; a handler that throws doesn't stop
+the others. `fetch` and `XMLHttpRequest` support same-origin GET with text/JSON
+responses. Requests and redirects must remain same-origin; they carry the
+browser's cookies, but `document.cookie` reads as empty, and authorization and
+custom headers are absent. `URL`, `URLSearchParams`, `matchMedia` (answered as
+the stylesheets are, for 786 CSS pixels), `performance.now`, in-memory
+`localStorage`/`sessionStorage` and `CustomEvent` are available.
 
 This is a small browser DOM, not the full Web platform. Selectors support tags,
-IDs, classes and descendants. Node collections are snapshots. The fragment
-parser is deliberately limited. One-shot function timers run once after loading;
-requested delays are not emulated. There is no persistent event loop after
-loading, click handler dispatch, setInterval, script-driven form submission,
-XHR, WebSocket, storage, canvas, layout measurement, workers or OS bindings.
-`location` is a read-only address snapshot. Full SPA frameworks and most modern
-interactive sites will still fail. Failed scripts show available readable text.
+IDs, classes, attributes (all operators), the descendant, `>`, `+` and `~`
+combinators, and structural pseudo-classes (`:not()`, `:is()`, `:first-child`,
+`:nth-child()` and the like, `:checked`, `:disabled`); an invalid selector throws
+a SyntaxError. Node collections are snapshots. The fragment parser is
+deliberately limited. Timers, intervals and animation frames each run once after
+loading; requested delays are not emulated. Mutation, intersection and resize
+observers exist but never report. There is no persistent event loop after
+loading, click handler dispatch, script-driven form submission, WebSocket,
+canvas, layout measurement (sizes read as 0), workers or OS bindings.
+`location` is a read-only address snapshot. Scripts from other sites aren't
+downloaded, so pages built on a CDN's library (jQuery from a CDN) or entirely by
+a framework will still fail; failed scripts show available readable text.
 
 ## CSS
 
-Inline style, style blocks and external stylesheets support tag/ID/class,
-descendant and child selectors, specificity, source order and `!important`.
+Inline style, style blocks and external stylesheets support the cascade:
+specificity, source order and `!important`. Selectors can use tags, IDs,
+classes (including escaped ones such as Tailwind's `md:flex`), attributes
+(`[type=search]`, `^=`, `$=`, `*=`, `~=`, `|=`), the descendant, child and
+sibling combinators, `:not()`, `:is()`, `:where()`, `:first-child`,
+`:last-child`, `:nth-child()` and its relatives, `:root`, `:empty`,
+`:checked`, `:disabled` and `:lang()`. States a page nobody has touched
+doesn't have (`:hover`, `:focus`, `:visited`) and pseudo-elements (`::before`)
+never match.
+
+`@media` queries are evaluated for the page view, which is 786 CSS pixels wide
+(a tablet: navigation bars stay expanded rather than collapsing into menus that
+need scripts). Light color schemes, landscape orientation and a fine pointer
+match; print styles don't. `@layer` and `@supports` blocks apply. `var()`
+resolves custom properties from the element's own rules, then from the root
+element's. Colors can be named, hex, `rgb()`, `hsl()`, `oklch()` or `oklab()`.
+
 Supported properties include color, background color, font size/weight/style,
 text decoration and transform, text alignment, white space, display,
-visibility, list style, margin, padding, border, width, max-width and height,
-in px, em, rem, pt, %, vw and vh. Old HTML attributes (`bgcolor`, `align`,
-`width`, `<font>`, `<center>`) work too.
-
-Screen media blocks are accepted; print blocks are ignored. Width/feature media
-queries are not evaluated. Floats, positioning, columns, box sizing, CSS
-variables, animations, pseudo classes, attribute selectors, @import and
-background images are unavailable.
+visibility, list style, margin, padding, border, width, max-width, height and
+gap, in px, em, rem, pt, %, vw, vh and ch. Old HTML attributes (`bgcolor`,
+`align`, `width`, `<font>`, `<center>`) work too. Elements moved out of view
+(screen-reader text, closed drawers, collapsed menus) aren't shown. A gradient
+background is drawn in the average of its colors. Text that would vanish into
+what is behind it (white text meant for a background picture, which isn't
+drawn) is shown dark on light backgrounds and light on dark ones. Floats,
+positioning, columns, animations, @import and background images are
+unavailable.
 
 ## Larger pages and PSP limits
 
@@ -145,16 +180,20 @@ Pages are downloaded with HTTP compression into `.cache/page.tmp` on storage,
 then parsed in small chunks; the complete response is never buffered in RAM.
 The temporary file is deleted after use or transfer failure. A forced power-off
 may leave it behind; the next load replaces it. Decoded responses are capped at
-8 MB, reader text at 256 KB, links at 256, anchors at 128 and DOM nodes at 2,048.
+8 MB, reader text at 256 KB, links at 256, anchors at 128 and DOM nodes at 16,384.
 DOM text/attributes are bounded at 768 KB and nesting at 64. Oversized script
 blocks are skipped while parsing continues to later readable content. The page
 view holds up to 16,384 laid-out pieces with 512 KB of text, 1,024 links, 256
 form fields and 32 forms; longer pages are cut off with a notice.
 
-Stylesheets are limited to 64 KB each / 128 KB total / 256 rules. Scripts are
+Stylesheets are downloaded up to 2 MB each (4 MB in all) and reduced at once
+to the rules that can match the page, which keeps up to 4,096 rules in 384 KB;
+SVG drawings and `<template>` contents aren't kept either. Scripts are
 limited to 512 KB each / 1 MB source total; asset requests are capped at 16.
 JavaScript gets an accounting heap limit of 8 MB, a 64 KB stack limit, at most
-2,048 pending jobs per drain, and a 30-second execution budget per page.
+2,048 pending jobs per drain, and a 30-second execution budget per page. Pages
+of more than 6,000 DOM nodes are shown without running their scripts, which
+wouldn't fit in that heap; scripts may add up to 2,048 nodes.
 Network waiting does not consume that execution budget. Fetch/module requests share
 8 requests / 512 KB total, with at most 256 KB per response. These limits keep
 a slow or malformed page from consuming all console memory. Notices identify
