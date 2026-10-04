@@ -87,17 +87,29 @@ bullets or numbers; tables share their width between columns by content, with
 `colspan`, cell padding, spacing and borders. An inline-block holding blocks
 (a menu or a card) becomes a box as wide as its content.
 
+Side-by-side layouts are laid out as on a computer. A flex container puts its
+items in a row, where they grow, shrink and wrap as `flex`, `flex-wrap`,
+`order` and `min-width` say. Auto margins, `justify-content` and `gap` space
+them, and `align-items` stretches them to the row's height or aligns them in
+it. A column flex container stacks its items, centered when `align-items`
+says so. A grid places its items in the columns of `grid-template-columns`
+(lengths, `fr`, `repeat()`, `minmax()` and `auto-fill`), spanning them with
+`grid-column`. A floated box sits at the left or right with the following text
+beside it, `clear` moves content below floats, and a block grows to hold the
+floats in it. The screen doesn't scroll sideways, so items that wouldn't fit
+even at their narrowest wrap to the next row, and grid columns narrower than a
+few words are merged. `position` is ignored: positioned boxes are laid out in
+the normal flow, after a flex or grid container's items.
+
 Text hidden for screen readers, `display:none`, `visibility:hidden` and
-off-screen text are not shown. Floats and positioning are ignored, so floated
-boxes appear in reading order. Flex and grid containers are laid out as normal
-blocks; `justify-content` aligns their inline content. Images are not
-downloaded: they show as boxes with their description (`alt` text), at their
-size when the page gives it. Italic text is drawn upright, and CSS font
-families are not used. HTML 4's named characters (`&rsaquo;`, `&eacute;`,
-`&rarr;`...) and HTML 5's common ones are decoded; soft hyphens and zero-width
-characters are dropped. A link or button showing only an icon shows its name
-(`aria-label`, `title` or the picture's description) instead, and links that
-touch, as in menus spaced out by CSS, are kept a space apart.
+off-screen text are not shown. Images are not downloaded: they show as boxes
+with their description (`alt` text), at their size when the page gives it.
+Italic text is drawn upright, and CSS font families are not used. HTML 4's
+named characters (`&rsaquo;`, `&eacute;`, `&rarr;`...) and HTML 5's common ones
+are decoded; soft hyphens and zero-width characters are dropped. A link or
+button showing only an icon shows its name (`aria-label`, `title` or the
+picture's description) instead, and links that touch, as in menus spaced out by
+CSS, are kept a space apart.
 
 ## Forms and cookies
 
@@ -180,14 +192,15 @@ element's. Colors can be named, hex, `rgb()`, `hsl()`, `oklch()` or `oklab()`.
 
 Supported properties include color, background color, font size/weight/style,
 text decoration and transform, text alignment, white space, display,
-visibility, list style, margin, padding, border, width, max-width, height and
-gap, in px, em, rem, pt, %, vw, vh and ch. Old HTML attributes (`bgcolor`,
+visibility, list style, margin, padding, border, width, min-width, max-width,
+height, float, clear, and the flex and grid properties above, in px, em, rem,
+pt, %, vw, vh and ch. Old HTML attributes (`bgcolor`,
 `align`, `width`, `<font>`, `<center>`) work too. Elements moved out of view
 (screen-reader text, closed drawers, collapsed menus) aren't shown. A gradient
 background is drawn in the average of its colors. Text that would vanish into
 what is behind it (white text meant for a background picture, which isn't
-drawn) is shown dark on light backgrounds and light on dark ones. Floats,
-positioning, columns, animations, @import and background images are
+drawn) is shown dark on light backgrounds and light on dark ones.
+Positioning, multi-column text, animations, @import and background images are
 unavailable.
 
 ## Larger pages and PSP limits

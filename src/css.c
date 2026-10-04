@@ -1080,7 +1080,7 @@ static int background_color(const char *v,uint32_t *out)
 static int length(const char *v,float scale,int percent,int *out,float *css_px)
 {
     char *end;float x=strtof(v,&end),px;
-    if(end==v){if(eq(v,"auto")){*out=BOX_AUTO;return 1;}if(eq(v,"thin")){x=1;end=(char *)"px";}else if(eq(v,"medium")){x=3;end=(char *)"px";}else if(eq(v,"thick")){x=5;end=(char *)"px";}else return 0;}
+    if(end==v){if(eq(v,"auto")){*out=BOX_AUTO;if(css_px)*css_px=-1;return 1;}if(eq(v,"thin")){x=1;end=(char *)"px";}else if(eq(v,"medium")){x=3;end=(char *)"px";}else if(eq(v,"thick")){x=5;end=(char *)"px";}else return 0;}
     if(eq(end,"px")||!*end)px=x;
     else if(eq(end,"em"))px=x*16*scale/0.64f;
     else if(eq(end,"rem"))px=x*16;
@@ -1197,6 +1197,153 @@ static int resolve(const char *v,const scope *sc,char *out,size_t size,int depth
     }
     out[n]=0;return 1;
 }
+/* ---- flex and grid ---- */
+
+/* One grid track: a length, a percentage, fr, or a size from the content (auto). */
+static int track(browser_box *b,char *t,float scale)
+{
+    if(b->tracks>=GRID_TRACKS)return 0;
+    int i=b->tracks,value;char *end;float x=strtof(t,&end);
+    if(!strncmp(t,"minmax(",7)){
+        /* the maximum decides: a share of the space, or a size */
+        char *comma=strchr(t+7,',');if(!comma)return 0;
+        char *last=trim(comma+1);size_t n=strlen(last);if(n&&last[n-1]==')')last[n-1]=0;
+        return track(b,trim(last),scale);
+    }
+    if(end!=t&&eq(end,"fr")){b->track_kind[i]=TRACK_FR;b->track[i]=(short)clamp((int)(x*100+0.5f),1,10000);}
+    else if(eq(t,"auto")||eq(t,"min-content")||eq(t,"max-content")||!strncmp(t,"fit-content",11)){b->track_kind[i]=TRACK_AUTO;b->track[i]=100;}
+    else if(length(t,scale,1,&value,NULL)&&value!=BOX_AUTO){
+        if(value<0){b->track_kind[i]=TRACK_PERCENT;b->track[i]=(short)-value;}
+        else{b->track_kind[i]=TRACK_PX;b->track[i]=(short)clamp(value,0,2000);}
+    }
+    else return 0;
+    b->tracks++;return 1;
+}
+/* The next space-separated part of a value, keeping (...) together. */
+static char *value_part(char **p)
+{
+    while(**p==' '||**p=='\t')(*p)++;
+    if(!**p)return NULL;
+    char *start=*p;int depth=0;
+    for(;**p&&(depth||(**p!=' '&&**p!='\t'));(*p)++){if(**p=='(')depth++;else if(**p==')')depth--;}
+    if(**p)*(*p)++=0;
+    return start;
+}
+static void tracks(browser_box *b,const char *list,float scale,int depth)
+{
+    char copy[256];if(strlen(list)>=sizeof(copy)||depth>1)return;strcpy(copy,list);
+    char *p=copy,*t;int names=0;
+    while((t=value_part(&p))&&b->tracks<GRID_TRACKS){
+        /* line names: [a b] */
+        if(*t=='['||names){names=!strchr(t,']');continue;}
+        if(!strncmp(t,"repeat(",7)){
+            char *inner=t+7,*close=strrchr(inner,')'),*comma=strchr(inner,',');
+            if(!close||!comma||comma>close)continue;
+            *close=0;*comma=0;
+            char *count=trim(inner),*repeated=trim(comma+1);
+            if(eq(count,"auto-fill")||eq(count,"auto-fit")){
+                /* as many columns as fit, each at least this wide */
+                char *min=repeated;int value;
+                if(!strncmp(min,"minmax(",7)){min+=7;char *c=strchr(min,',');if(c)*c=0;}
+                min=trim(min);
+                if(length(min,scale,0,&value,NULL)&&value!=BOX_AUTO&&value>0)b->fill=(short)clamp(value,8,2000);
+                continue;
+            }
+            for(int k=atoi(count);k>0&&b->tracks<GRID_TRACKS;k--)tracks(b,repeated,scale,depth+1);
+            continue;
+        }
+        track(b,t,scale);
+    }
+}
+/* grid-column: "span 2", "1 / -1" (the whole row), "1 / 3", "2 / span 2" */
+static unsigned char columns_spanned(const char *v)
+{
+    const char *slash=strchr(v,'/'),*end=slash?slash+1:v;
+    while(*end==' ')end++;
+    if(!strncmp(end,"span",4))return (unsigned char)clamp(atoi(end+4),1,254);
+    if(!slash)return 1;
+    int first=atoi(v),last=atoi(end);
+    if(last<0)return SPAN_ROW;
+    return (unsigned char)(first>0&&last>first?clamp(last-first,1,254):1);
+}
+static unsigned char align_value(const char *v)
+{
+    if(eq(v,"center")||eq(v,"safe center"))return 2;
+    if(eq(v,"flex-end")||eq(v,"end")||eq(v,"self-end"))return 3;
+    if(eq(v,"flex-start")||eq(v,"start")||eq(v,"self-start")||strstr(v,"baseline"))return 1;
+    return 0;
+}
+/* flex: none, auto, a grow factor ("1" has a basis of 0), "grow shrink basis" */
+static void flex_shorthand(browser_box *b,const char *v,float scale)
+{
+    if(eq(v,"none")||eq(v,"auto")||eq(v,"initial")){
+        b->grow=eq(v,"auto")?100:0;b->shrink=eq(v,"none")?0:100;b->basis=BOX_AUTO;
+        b->flex|=FLEX_SHRINK_SET|FLEX_BASIS_SET;return;
+    }
+    char copy[96];if(strlen(v)>=sizeof(copy))return;strcpy(copy,v);
+    int numbers=0,has_basis=0,value;float n[2]={0,1};
+    for(char *t=strtok(copy," \t");t;t=strtok(NULL," \t")){
+        char *end;float x=strtof(t,&end);
+        if(end!=t&&!*end&&numbers<2&&!(numbers&&x==0&&has_basis)){n[numbers++]=x;continue;}
+        if(eq(t,"content")){b->basis=BOX_AUTO;has_basis=1;}
+        else if(length(t,scale,1,&value,NULL)){b->basis=(short)value;has_basis=1;}
+    }
+    if(!numbers&&!has_basis)return;
+    b->grow=(short)clamp((int)(n[0]*100+0.5f),0,10000);
+    b->shrink=(short)clamp((int)(n[1]*100+0.5f),0,10000);
+    if(!has_basis)b->basis=numbers?0:BOX_AUTO;
+    b->flex|=FLEX_SHRINK_SET|FLEX_BASIS_SET;
+}
+static short gap_length(const char *v,float scale)
+{
+    int value;
+    if(eq(v,"normal"))return 0;
+    return length(v,scale,0,&value,NULL)&&value!=BOX_AUTO?(short)clamp(value,0,40):-1;
+}
+/* The flex, grid and float properties of a box; 0 when `key` isn't one. */
+static int layout_property(browser_box *b,const char *key,const char *v,float scale)
+{
+    int value;
+    if(eq(key,"flex-direction"))b->direction=eq(v,"row-reverse")?1:eq(v,"column")?2:eq(v,"column-reverse")?3:0;
+    else if(eq(key,"flex-wrap"))b->wrap=eq(v,"wrap")||eq(v,"wrap-reverse");
+    else if(eq(key,"flex-flow")){
+        if(strstr(v,"column"))b->direction=strstr(v,"column-reverse")?3:2;else if(strstr(v,"row-reverse"))b->direction=1;else if(strstr(v,"row"))b->direction=0;
+        if(strstr(v,"nowrap"))b->wrap=0;else if(strstr(v,"wrap"))b->wrap=1;
+    }
+    else if(eq(key,"flex"))flex_shorthand(b,v,scale);
+    else if(eq(key,"flex-grow")){char *end;float x=strtof(v,&end);if(end!=v)b->grow=(short)clamp((int)(x*100+0.5f),0,10000);}
+    else if(eq(key,"flex-shrink")){char *end;float x=strtof(v,&end);if(end!=v){b->shrink=(short)clamp((int)(x*100+0.5f),0,10000);b->flex|=FLEX_SHRINK_SET;}}
+    else if(eq(key,"flex-basis")){if(eq(v,"content")||eq(v,"auto")){b->basis=BOX_AUTO;b->flex|=FLEX_BASIS_SET;}else if(length(v,scale,1,&value,NULL)){b->basis=(short)value;b->flex|=FLEX_BASIS_SET;}}
+    else if(eq(key,"order"))b->order=(short)clamp(atoi(v),-999,999);
+    else if(eq(key,"align-items"))b->align=align_value(v);
+    else if(eq(key,"align-self"))b->align_self=eq(v,"auto")?0:(unsigned char)(align_value(v)+1);
+    else if(eq(key,"justify-content")){
+        b->justify=eq(v,"center")||eq(v,"safe center")?2:eq(v,"flex-end")||eq(v,"end")||eq(v,"right")?3:eq(v,"flex-start")||eq(v,"start")||eq(v,"left")?1:
+                   eq(v,"space-between")?4:eq(v,"space-around")?5:eq(v,"space-evenly")?6:0;
+    }
+    else if(eq(key,"gap")||eq(key,"grid-gap")){
+        char copy[64];if(strlen(v)>=sizeof(copy))return 1;strcpy(copy,v);
+        char *second=copy+strcspn(copy," \t");if(*second)*second++=0;second=trim(second);
+        short row=gap_length(copy,scale),column=*second?gap_length(second,scale):row;
+        if(row>=0)b->row_gap=row;
+        if(column>=0)b->gap=column;
+    }
+    else if(eq(key,"column-gap")||eq(key,"grid-column-gap")){short g=gap_length(v,scale);if(g>=0)b->gap=g;}
+    else if(eq(key,"row-gap")||eq(key,"grid-row-gap")){short g=gap_length(v,scale);if(g>=0)b->row_gap=g;}
+    else if(eq(key,"grid-template-columns")){b->tracks=0;b->fill=0;tracks(b,v,scale,0);}
+    else if(eq(key,"grid-template")||eq(key,"grid")){const char *slash=strchr(v,'/');if(slash&&!strstr(v,"auto-flow")){b->tracks=0;b->fill=0;tracks(b,slash+1,scale,0);}}
+    else if(eq(key,"grid-column")||eq(key,"grid-column-end"))b->span=columns_spanned(v);
+    else if(eq(key,"float"))b->float_side=eq(v,"left")||eq(v,"inline-start")?1:eq(v,"right")||eq(v,"inline-end")?2:0;
+    else if(eq(key,"clear"))b->clear=eq(v,"left")||eq(v,"inline-start")?1:eq(v,"right")||eq(v,"inline-end")?2:eq(v,"both")?3:0;
+    else if(eq(key,"position"))b->positioned=eq(v,"absolute")||eq(v,"fixed");
+    else if(eq(key,"min-width")){
+        if(eq(v,"auto")||eq(v,"initial"))b->flex&=~MIN_WIDTH_SET;
+        else if(length(v,scale,1,&value,NULL)&&value!=BOX_AUTO){b->min_width=(short)clamp(value,-100,2000);b->flex|=MIN_WIDTH_SET;}
+    }
+    else return 0;
+    return 1;
+}
+
 static void declarations(browser_style *s,browser_box *b,const char *text,int priority,const scope *sc)
 {
     if(strlen(text)>=4096)return;
@@ -1216,11 +1363,13 @@ static void declarations(browser_style *s,browser_box *b,const char *text,int pr
         else if(eq(key,"background-clip")||eq(key,"-webkit-background-clip")){if(eq(v,"text"))s->flags|=CSS_CLIP_TEXT;else s->flags&=~CSS_CLIP_TEXT;}
         else if((eq(key,"appearance")||eq(key,"-webkit-appearance")||eq(key,"-moz-appearance"))&&eq(v,"none")){if(b)b->plain|=1;}
         else if(eq(key,"display")){
-            int d=eq(v,"none")?DISPLAY_NONE:eq(v,"block")||eq(v,"grid")||eq(v,"flow-root")||eq(v,"-webkit-box")?DISPLAY_BLOCK:eq(v,"flex")?DISPLAY_FLEX:
+            int flex=eq(v,"flex")||eq(v,"-webkit-flex")||eq(v,"-ms-flexbox")||eq(v,"inline-flex")||eq(v,"-webkit-inline-flex"),grid=eq(v,"grid")||eq(v,"inline-grid");
+            int d=eq(v,"none")?DISPLAY_NONE:eq(v,"block")||eq(v,"flow-root")||eq(v,"-webkit-box")?DISPLAY_BLOCK:eq(v,"grid")?DISPLAY_GRID:
+                  eq(v,"flex")||eq(v,"-webkit-flex")||eq(v,"-ms-flexbox")?DISPLAY_FLEX:
                   eq(v,"list-item")?DISPLAY_LIST_ITEM:eq(v,"table")?DISPLAY_TABLE:eq(v,"table-row")?DISPLAY_ROW:eq(v,"table-cell")?DISPLAY_CELL:
-                  eq(v,"inline")||eq(v,"contents")?DISPLAY_INLINE:eq(v,"inline-block")||eq(v,"inline-flex")||eq(v,"inline-grid")||eq(v,"inline-table")?DISPLAY_INLINE_BLOCK:-1;
+                  eq(v,"inline")||eq(v,"contents")?DISPLAY_INLINE:eq(v,"inline-block")||eq(v,"inline-flex")||eq(v,"-webkit-inline-flex")||eq(v,"inline-grid")||eq(v,"inline-table")?DISPLAY_INLINE_BLOCK:-1;
             if(d==DISPLAY_NONE)s->hidden=1;else if(d>=0){s->hidden=0;s->block=d!=DISPLAY_INLINE&&d!=DISPLAY_INLINE_BLOCK;}
-            if(b&&d>=0)b->display=(unsigned char)d;
+            if(b&&d>=0){b->display=(unsigned char)d;b->inner=flex?INNER_FLEX:grid?INNER_GRID:INNER_FLOW;}
         }
         else if(eq(key,"visibility")&&(eq(v,"hidden")||eq(v,"collapse")))s->hidden=1;
         else if(eq(key,"content-visibility")&&eq(v,"hidden"))s->hidden=1;
@@ -1256,7 +1405,7 @@ static void declarations(browser_style *s,browser_box *b,const char *text,int pr
             }
         }
         else if(b){
-            int value,four[4];float px;
+            int value,four[4];float px=-1;
             if(eq(key,"margin")){if(sides(v,s->scale,four))for(int i=0;i<4;i++){b->margin[i]=(short)(four[i]==BOX_AUTO?BOX_AUTO:clamp(four[i],-40,120));b->set|=1<<i;}}
             else if(!strncmp(key,"margin-",7)){int i=eq(key+7,"top")?0:eq(key+7,"right")?1:eq(key+7,"bottom")?2:eq(key+7,"left")?3:-1;if(i>=0&&length(v,s->scale,0,&value,NULL)){b->margin[i]=(short)(value==BOX_AUTO?BOX_AUTO:clamp(value,-40,120));b->set|=1<<i;}}
             else if(eq(key,"padding")){if(sides(v,s->scale,four))for(int i=0;i<4;i++){b->padding[i]=(short)clamp(four[i]==BOX_AUTO?0:four[i],0,60);b->set|=16<<i;}}
@@ -1277,8 +1426,7 @@ static void declarations(browser_style *s,browser_box *b,const char *text,int pr
                 else if(eq(v,"none")&&eq(key,"max-width"))b->max_width=0;
             }
             else if(eq(key,"overflow")&&(eq(v,"hidden")||eq(v,"clip")))b->hide|=HIDE_OVERFLOW;
-            else if(eq(key,"justify-content"))b->justify=eq(v,"center")||eq(v,"space-around")||eq(v,"space-evenly")?2:eq(v,"flex-end")||eq(v,"end")||eq(v,"right")?3:eq(v,"flex-start")||eq(v,"start")||eq(v,"left")?1:0;
-            else if(eq(key,"gap")||eq(key,"column-gap")||eq(key,"grid-gap")||eq(key,"grid-column-gap")){char first[32];size_t m=strcspn(v," ");if(m<sizeof(first)){memcpy(first,v,m);first[m]=0;if(length(first,s->scale,0,&value,NULL)&&value!=BOX_AUTO)b->gap=(short)clamp(value,0,40);}}
+            else if(layout_property(b,key,v,s->scale)){}
             else if((eq(key,"clip")&&strstr(v,"rect"))||(eq(key,"clip-path")&&(strstr(v,"inset(50%")||strstr(v,"inset(100%"))))b->hide|=HIDE_CLIP;
             else if((eq(key,"left")||eq(key,"top")||eq(key,"right")||eq(key,"text-indent")||eq(key,"inset-inline-start"))&&length(v,s->scale,0,&value,&px)&&px<=-500)b->hide|=HIDE_OFFSCREEN;
             else if(eq(key,"transform")&&offscreen(v))b->hide|=HIDE_OFFSCREEN;

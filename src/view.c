@@ -31,7 +31,12 @@ typedef struct {
     int space;                  /* collapsed whitespace waits for the next word */
     browser_style space_style;  /* ...with the style and link where it was */
     int space_link, space_control;
+    int full, full_x, full_width;   /* the room without floats, once a line was shortened */
 } line_state;
+
+#define FLOATS_MAX 32
+#define ROOM_MIN 60             /* narrower room beside floats is skipped */
+typedef struct { int x, y, w, h, side; } float_area;
 
 typedef struct {
     browser_view *v;
@@ -53,6 +58,13 @@ typedef struct {
     int depth, scripting, failed;
     const char *name;           /* an icon link's name, shown in place of its content */
     uint32_t backdrop;          /* the background drawn behind the open block (0: the paper) */
+    int item_width;             /* >= 0: the next element is a flex or grid item this wide */
+    int budget;                 /* elements content_widths() may still visit (0: no limit) */
+    struct { int node, background, border[4]; } last;   /* the block laid out last, for stretching */
+    float_area floats[FLOATS_MAX];  /* floated boxes, in page pixels with their margins */
+    int float_count;
+    struct measured { float minimum, maximum; } *measured;  /* inner_widths() by node, when known */
+    unsigned char *known;
 } builder;
 
 static int eq(const char *a, const char *b)
@@ -168,11 +180,50 @@ static void place_marker(builder *b, int line_x, int top, float asc)
     b->marker = 0;
 }
 
+/* The room at page row y between floats, within [x, x + width): the left and
+   right edges, and the row where the first float there ends (-1: none). */
+static int band(builder *b, int y, int x, int width, int *left, int *right)
+{
+    int next = -1;
+    *left = x; *right = x + width;
+    for (int i = 0; i < b->float_count; i++) {
+        const float_area *f = &b->floats[i];
+        if (y < f->y || y >= f->y + f->h || f->x >= x + width || f->x + f->w <= x) continue;
+        if (f->side == 1 && f->x + f->w > *left) *left = f->x + f->w;
+        if (f->side == 2 && f->x < *right) *right = f->x;
+        if (next < 0 || f->y + f->h < next) next = f->y + f->h;
+    }
+    return next;
+}
+
+static void full_room(line_state *l)
+{
+    if (l->full) { l->x = l->full_x; l->width = l->full_width; }
+}
+
+/* Before a line's first piece: floats beside it take room from it, and a
+   line that would be too narrow for `need` moves down below them. */
+static void line_room(builder *b, float need)
+{
+    line_state *l = b->line;
+    if (!l || l->count || !b->float_count) return;
+    if (!l->full) { l->full = 1; l->full_x = l->x; l->full_width = l->width; }
+    int wanted = need > ROOM_MIN ? (int)need : ROOM_MIN;
+    if (wanted > l->full_width) wanted = l->full_width;
+    for (int pass = 0; pass <= FLOATS_MAX; pass++) {
+        int left, right, next = band(b, *b->y, l->full_x, l->full_width, &left, &right);
+        l->x = left; l->width = right - left;
+        if (next < 0 || l->width >= wanted) return;
+        *b->y = next;
+        b->collapse = 0;
+    }
+}
+
 static void flush_line(builder *b)
 {
     line_state *l = b->line;
     if (!l) return;
-    if (!l->count) { l->space = 0; return; }
+    if (!l->count) { l->space = 0; full_room(l); return; }
     piece *p = &b->pieces[l->first];
     /* A space at the end of a line takes no room. */
     piece *last = &p[l->count - 1];
@@ -221,6 +272,7 @@ static void flush_line(builder *b)
     b->piece_count = l->first;
     l->count = 0; l->used = 0; l->space = 0;
     b->collapse = 0;
+    full_room(l);
 }
 
 static piece *new_piece(builder *b)
@@ -271,6 +323,7 @@ static void add_gap(builder *b, int width, uint32_t background, browser_style st
     }
     l->space = 0;
     if (l->count && l->used + width > l->width) flush_line(b);
+    line_room(b, (float)width);
     piece *p = new_piece(b);
     if (!p) return;
     p->box = 1; p->first = b->v->item_count; p->count = 0; p->width = (float)width;
@@ -321,6 +374,9 @@ static int carry_word(builder *b, float width)
     if (cut) { p[i].width -= rest; p[i].length = cut; l->count = i + 1; }
     else l->count = i;
     flush_line(b);
+    float moving = 0;
+    for (int k = 0; k < count; k++) moving += moved[k].width;
+    line_room(b, moving);
     for (int k = 0; k < count; k++) {
         piece *q = new_piece(b);
         if (!q) return 1;
@@ -360,6 +416,7 @@ static void add_word(builder *b, const char *word, int n, browser_style st)
         if (l->space || !carry_word(b, width)) flush_line(b);
         space = 0;
     }
+    line_room(b, width);
     if (space > 0) add_run(b, " ", 1, space, gap, l->space_link, l->space_control);
     l->space = 0;
     if (width <= l->width || l->width < 8) { add_run(b, copy, n, width, st, b->link, b->label); return; }
@@ -377,7 +434,7 @@ static void add_word(builder *b, const char *word, int n, browser_style st)
         }
         add_run(b, copy + start, end - start, w, st, b->link, b->label);
         start = end;
-        if (start < n) flush_line(b);
+        if (start < n) { flush_line(b); line_room(b, 0); }
     }
 }
 
@@ -401,6 +458,7 @@ static void add_text(builder *b, const char *text, browser_style st)
                 int n = *p == '\t' ? 4 : 1;
                 for (int i = 0; i < n; i++) {
                     float w = width_of(b, " ", 1, st.scale, st.flags);
+                    line_room(b, w);
                     if (l->used + w <= l->width) add_run(b, " ", 1, w, st, b->link, b->label);
                 }
                 p++;
@@ -431,6 +489,7 @@ static void add_box(builder *b, int first, int w, int h, float base)
         if ((!last->box && last->link >= 0) || (last->box && last->count > 0)) l->space = 1;
     }
     if (l->count && l->used + (l->space ? 4 : 0) + w > l->width) flush_line(b);
+    line_room(b, (float)w);
     if (l->space && l->count) {
         piece *gap = new_piece(b);
         if (gap) { gap->box = 1; gap->first = first; gap->count = 0; gap->width = 4; l->used += 4; }
@@ -819,6 +878,9 @@ static void default_box(const dom_node *n, browser_box *box)
 }
 
 static void table(builder *b, int node, browser_style st, int x, int width);
+static void flex(builder *b, int node, browser_style st, const browser_box *box, int x, int width);
+static void grid(builder *b, int node, browser_style st, const browser_box *box, int x, int width);
+static void float_box(builder *b, int node, browser_style parent, browser_style st, browser_box box);
 
 static void block(builder *b, int node, browser_style st, browser_box *box, int cx, int cwidth)
 {
@@ -830,6 +892,12 @@ static void block(builder *b, int node, browser_style st, browser_box *box, int 
     int ml = box->margin[3] == BOX_AUTO ? 0 : box->margin[3], mr = box->margin[1] == BOX_AUTO ? 0 : box->margin[1];
     if (mt < 0) mt = 0;
     if (mb < 0) mb = 0;
+    if (box->clear) {
+        /* below the floats on that side */
+        for (int i = 0; i < b->float_count; i++)
+            if ((box->clear & b->floats[i].side) && b->floats[i].y + b->floats[i].h > *y) { *y = b->floats[i].y + b->floats[i].h; b->collapse = 0; }
+    }
+    int floats = b->float_count;
     if (mt > b->collapse) *y += mt - b->collapse;
     b->collapse = mt > b->collapse ? mt : b->collapse;
     int avail = cwidth - ml - mr, w = avail;
@@ -862,7 +930,9 @@ static void block(builder *b, int node, browser_style st, browser_box *box, int 
     int content_top = *y;
 
     /* The content's own line context. */
-    line_state line = { .x = inner_x, .width = inner_w, .align = box->justify ? box->justify - 1 : st.align, .first = b->piece_count };
+    /* justify-content aligns a flex container's inline content */
+    int align = box->justify == 2 || box->justify == 5 || box->justify == 6 ? 1 : box->justify == 3 ? 2 : box->justify ? 0 : st.align;
+    line_state line = { .x = inner_x, .width = inner_w, .align = align, .first = b->piece_count };
     st.background = 0;      /* drawn above: inline content doesn't repeat it */
     line_state *outer = b->line;
     b->line = &line;
@@ -887,9 +957,15 @@ static void block(builder *b, int node, browser_style st, browser_box *box, int 
         b->name = NULL;
     }
     if (is(n, "table") || box->display == DISPLAY_TABLE) table(b, node, st, inner_x, inner_w);
+    else if (box->inner == INNER_FLEX) flex(b, node, st, box, inner_x, inner_w);
+    else if (box->inner == INNER_GRID) grid(b, node, st, box, inner_x, inner_w);
     else children(b, node, st);
     flush_line(b);
     if (b->marker && is(n, "li")) { place_marker(b, inner_x, *y, ascent(st.scale)); *y += (int)(LINE * st.scale); }
+    /* The block holds the floats in it (as with a clearfix), and they
+       don't reach past it. */
+    for (int i = floats; i < b->float_count; i++) if (b->floats[i].y + b->floats[i].h > *y) *y = b->floats[i].y + b->floats[i].h;
+    if (b->float_count > floats) { b->float_count = floats; b->collapse = 0; }
     b->backdrop = backdrop;
     b->line = outer;
     b->list_kind = list_kind; b->list_number = list_number;
@@ -898,10 +974,13 @@ static void block(builder *b, int node, browser_style st, browser_box *box, int 
     int bottom = *y;
     if (background >= 0) v->items[background].h = bottom - top;
     uint32_t c;
-    if (bt) { c = box->border_color[0] ? box->border_color[0] : st.color; add_item(b, item(ITEM_RECT, x, top, w, bt, c)); }
-    if (bb) { c = box->border_color[2] ? box->border_color[2] : st.color; add_item(b, item(ITEM_RECT, x, bottom - bb, w, bb, c)); }
-    if (bl) { c = box->border_color[3] ? box->border_color[3] : st.color; add_item(b, item(ITEM_RECT, x, top, bl, bottom - top, c)); }
-    if (br) { c = box->border_color[1] ? box->border_color[1] : st.color; add_item(b, item(ITEM_RECT, x + w - br, top, br, bottom - top, c)); }
+    int border[4] = {-1, -1, -1, -1};
+    if (bt) { c = box->border_color[0] ? box->border_color[0] : st.color; border[0] = add_item(b, item(ITEM_RECT, x, top, w, bt, c)); }
+    if (bb) { c = box->border_color[2] ? box->border_color[2] : st.color; border[2] = add_item(b, item(ITEM_RECT, x, bottom - bb, w, bb, c)); }
+    if (bl) { c = box->border_color[3] ? box->border_color[3] : st.color; border[3] = add_item(b, item(ITEM_RECT, x, top, bl, bottom - top, c)); }
+    if (br) { c = box->border_color[1] ? box->border_color[1] : st.color; border[1] = add_item(b, item(ITEM_RECT, x + w - br, top, br, bottom - top, c)); }
+    b->last.node = node; b->last.background = background;
+    memcpy(b->last.border, border, sizeof(border));
     *y += mb;
     b->collapse = mb;
 }
@@ -921,10 +1000,11 @@ static int holds_blocks(builder *b, int node, browser_style st)
 }
 
 static void content_widths(builder *b, int node, browser_style st, float *minimum, float *maximum, float *line, int depth);
+static void inner_widths(builder *b, int node, browser_style st, const browser_box *box, float *minimum, float *maximum, int depth);
 static int shrink_width(builder *b, int node, browser_style st, browser_box *box)
 {
-    float lo = 0, hi = 0, line = 0;
-    for (int c = b->dom->nodes[node].first; c >= 0; c = b->dom->nodes[c].next) content_widths(b, c, st, &lo, &hi, &line, 1);
+    float lo = 0, hi = 0;
+    inner_widths(b, node, st, box, &lo, &hi, 1);
     default_box(&b->dom->nodes[node], box);
     int w = (int)hi + (hi > (int)hi ? 1 : 0) + box->padding[1] + box->padding[3] + box->border[1] + box->border[3];
     return w > 16 ? w : 16;
@@ -943,6 +1023,14 @@ static void anchor(builder *b, const dom_node *n)
     v->anchor_count++;
 }
 
+static int replaced(const dom_node *n)
+{
+    static const char *tags[] = {"img", "input", "select", "textarea", "button", "iframe", "video", "audio", "embed", "object", "canvas"};
+    for (size_t i = 0; i < sizeof(tags) / sizeof(*tags); i++) if (is(n, tags[i])) return 1;
+    return 0;
+}
+
+static void element_styled(builder *b, int node, browser_style parent, browser_style st, browser_box box);
 static void element(builder *b, int node, browser_style parent)
 {
     const browser_dom *dom = b->dom;
@@ -957,6 +1045,17 @@ static void element(builder *b, int node, browser_style parent)
     browser_box box;
     browser_style st = css_compute_box(&b->doc->css, dom, node, parent, &box);
     if (st.hidden || box.hide || box.display == DISPLAY_NONE) return;
+    element_styled(b, node, parent, st, box);
+}
+
+/* An element whose style the caller computed. */
+static void element_styled(builder *b, int node, browser_style parent, browser_style st, browser_box box)
+{
+    const browser_dom *dom = b->dom;
+    const dom_node *n = &dom->nodes[node];
+    /* A flex or grid item is a block of the width its container gave it. */
+    int item = b->item_width >= 0;
+    if (item) { box.width = (short)(b->item_width > 16 ? b->item_width : 16); box.max_width = 0; b->item_width = -1; }
     if (is(n, "body") || is(n, "html")) {
         if (st.background) b->v->paper = st.background;
         if (st.color != parent.color) b->v->ink = st.color;
@@ -965,7 +1064,11 @@ static void element(builder *b, int node, browser_style parent)
     anchor(b, n);
     if (is(n, "br")) { line_break(b, st.scale); return; }
     if (is(n, "input") || is(n, "select") || is(n, "textarea") || is(n, "button")) { field(b, node, st, &box); return; }
-    if (is(n, "img")) { image(b, node, st, &box); return; }
+    if (is(n, "img")) {
+        if (box.float_side && !item) float_box(b, node, parent, st, box);
+        else image(b, node, st, &box);
+        return;
+    }
     if (is(n, "iframe") || is(n, "video") || is(n, "audio") || is(n, "embed") || is(n, "object") || is(n, "canvas")) {
         if (is(n, "canvas")) return;
         browser_style label = st;
@@ -993,10 +1096,14 @@ static void element(builder *b, int node, browser_style parent)
         if (c >= 0) b->label = c;
     }
     int inline_block = box.display == DISPLAY_INLINE_BLOCK && holds_blocks(b, node, st);
-    if (block_level(n, st, &box) || inline_block) {
+    if (box.float_side && !item && !is(n, "body") && !is(n, "html")) {
+        if (*icon) b->name = icon;
+        float_box(b, node, parent, st, box);
+        b->name = NULL;
+    } else if (block_level(n, st, &box) || inline_block || item) {
         flush_line(b);
         int x = b->line->x, width = b->line->width;
-        if (inline_block && !box.width) box.width = (short)shrink_width(b, node, st, &box);
+        if (inline_block && !box.width && !item) box.width = (short)shrink_width(b, node, st, &box);
         if (*icon) b->name = icon;
         block(b, node, st, &box, x, width);
         b->name = NULL;
@@ -1025,6 +1132,18 @@ static void element(builder *b, int node, browser_style parent)
 #define COLUMNS_MAX 16
 typedef struct { int node, column, span; } cell;
 
+/* The width of the name an icon link shows in place of its content (see
+   element()), or -1 when the element isn't one. */
+static float icon_width(builder *b, int node, browser_style st)
+{
+    const dom_node *n = &b->dom->nodes[node];
+    if (!is(n, "a") || !*dom_attr(n, "href") || has_content(b->dom, node, 0)) return -1;
+    char name[96] = "";
+    accessible_name(b->dom, node, name, sizeof(name));
+    browser_style ns = name_style(st);
+    return width_of(b, name, (int)strlen(name), ns.scale, ns.flags) + 1;
+}
+
 /* Narrowest (longest word) and widest (everything on one line) widths of a cell's content. */
 static void content_widths(builder *b, int node, browser_style st, float *minimum, float *maximum, float *line, int depth)
 {
@@ -1048,10 +1167,22 @@ static void content_widths(builder *b, int node, browser_style st, float *minimu
         return;
     }
     if (n->tag[0] == '#' || skipped(b, n)) return;
+    /* A flex or grid container measures its items with a budget: past it,
+       an item is taken as wide as there's room. */
+    if (b->budget > 0 && --b->budget == 0) b->budget = -1;
+    if (b->budget < 0) return;
     browser_box box;
     browser_style cs = css_compute_box(&b->doc->css, b->dom, node, st, &box);
     if (cs.hidden || box.hide || box.display == DISPLAY_NONE) return;
     if (is(n, "br")) { *line = 0; return; }
+    float w = icon_width(b, node, cs);
+    if (w >= 0) {
+        if (w > *minimum) *minimum = w;
+        *line += w;
+        if (*line > *maximum) *maximum = *line;
+        if (block_level(n, cs, &box)) *line = 0;
+        return;
+    }
     int h, fixed = -1;
     if (is(n, "img")) fixed = image_size(b, node, &box, 0, &h);
     else if (is(n, "input") || is(n, "select") || is(n, "button") || is(n, "textarea")) fixed = field_size(b, node, &box, 0, &h);
@@ -1064,8 +1195,8 @@ static void content_widths(builder *b, int node, browser_style st, float *minimu
     if (block_level(n, cs, &box) || (box.display == DISPLAY_INLINE_BLOCK && holds_blocks(b, node, cs))) {
         /* a block: its lines, plus its margins, borders and padding */
         default_box(n, &box);
-        float lo = 0, hi = 0, inner = 0;
-        for (int c = n->first; c >= 0; c = b->dom->nodes[c].next) content_widths(b, c, cs, &lo, &hi, &inner, depth + 1);
+        float lo = 0, hi = 0;
+        inner_widths(b, node, cs, &box, &lo, &hi, depth + 1);
         int margins = (box.margin[1] == BOX_AUTO ? 0 : clampi(box.margin[1], 0, 200)) + (box.margin[3] == BOX_AUTO ? 0 : clampi(box.margin[3], 0, 200));
         int sides = box.padding[1] + box.padding[3] + box.border[1] + box.border[3];
         if (box.width > 0) lo = hi = (float)(box.width + margins);
@@ -1074,6 +1205,12 @@ static void content_widths(builder *b, int node, browser_style st, float *minimu
             if (box.max_width > 0 && hi > box.max_width + margins) hi = (float)(box.max_width + margins);
         }
         if (lo > *minimum) *minimum = lo;
+        if (box.float_side) {
+            /* floats sit side by side */
+            *line += hi;
+            if (*line > *maximum) *maximum = *line;
+            return;
+        }
         if (hi > *maximum) *maximum = hi;
         *line = 0;
         return;
@@ -1085,6 +1222,499 @@ static void content_widths(builder *b, int node, browser_style st, float *minimu
     for (int c = n->first; c >= 0; c = b->dom->nodes[c].next) content_widths(b, c, cs, minimum, maximum, line, depth + 1);
     *line += after;
     if (*line > *maximum) *maximum = *line;
+}
+
+/* The narrowest and widest widths of an element's content, laid out as its
+   display says: a flex row's items side by side, a grid's in its columns. */
+static void measure_inner(builder *b, int node, browser_style st, const browser_box *box, float *minimum, float *maximum, int depth);
+static void inner_widths(builder *b, int node, browser_style st, const browser_box *box, float *minimum, float *maximum, int depth)
+{
+    /* Nested flex containers measure the same content again: once is enough. */
+    float lo = 0, hi = 0;
+    if (b->known && b->known[node]) { lo = b->measured[node].minimum; hi = b->measured[node].maximum; }
+    else {
+        int partial = b->budget < 0;
+        measure_inner(b, node, st, box, &lo, &hi, depth);
+        if (b->known && !partial && b->budget >= 0) { b->measured[node].minimum = lo; b->measured[node].maximum = hi; b->known[node] = 1; }
+    }
+    if (lo > *minimum) *minimum = lo;
+    if (hi > *maximum) *maximum = hi;
+}
+static void measure_inner(builder *b, int node, browser_style st, const browser_box *box, float *minimum, float *maximum, int depth)
+{
+    const browser_dom *dom = b->dom;
+    float line = 0;
+    if (box->inner == INNER_FLOW || depth > 24) {
+        for (int c = dom->nodes[node].first; c >= 0; c = dom->nodes[c].next) content_widths(b, c, st, minimum, maximum, &line, depth);
+        return;
+    }
+    int columns = box->inner == INNER_GRID ? (box->tracks ? box->tracks : box->fill ? 2 : 1) : box->direction >= 2 ? 1 : 0;
+    float sum = 0, widest = 0;
+    int items = 0;
+    for (int c = dom->nodes[node].first; c >= 0; c = dom->nodes[c].next) {
+        float lo = 0, hi = 0;
+        line = 0;
+        content_widths(b, c, st, &lo, &hi, &line, depth);
+        if (hi <= 0) continue;
+        if (lo > *minimum) *minimum = lo;
+        if (hi > widest) widest = hi;
+        sum += hi + (items ? box->gap : 0);
+        items++;
+    }
+    float wide = columns ? widest * (columns < items ? columns : items) + box->gap * ((columns < items ? columns : items) - 1) : sum;
+    if (wide > *maximum) *maximum = wide;
+}
+
+/* ---- flex and grid ---- */
+
+#define ITEMS_MAX 96
+#define MEASURE_BUDGET 3000     /* elements measured for one container's items */
+
+typedef struct {
+    int node, text;             /* text: an anonymous item for a run of text */
+    int out;                    /* positioned: laid out after the rows, in the normal flow */
+    browser_style st;
+    browser_box box;
+    float base, size, min, max, grow, shrink;   /* border-box widths */
+    int ml, mr, auto_left, auto_right, frozen;
+    int height, first, last;    /* laid out: height with margins, its items */
+    int record, background, border[4];          /* the item's own box, to stretch */
+} flex_item;
+
+static int has_text(const char *s)
+{
+    for (; s && *s; s++) if (!isspace((unsigned char)*s)) return 1;
+    return 0;
+}
+
+/* A container's items in `order`: its element children, and runs of text,
+   from *child on, at most ITEMS_MAX; *child becomes the next one (-1: none). */
+static int collect_items(builder *b, browser_style st, flex_item *items, int *child)
+{
+    const browser_dom *dom = b->dom;
+    int n = 0, c = *child;
+    for (; c >= 0 && n < ITEMS_MAX; c = dom->nodes[c].next) {
+        const dom_node *k = &dom->nodes[c];
+        flex_item *it = &items[n];
+        memset(it, 0, sizeof(*it));
+        it->node = c;
+        it->st = st;
+        if (!strcmp(k->tag, "#text")) {
+            if (st.hidden || !has_text(k->text)) continue;
+            it->text = 1;
+        } else {
+            if (k->tag[0] == '#' || skipped(b, k)) continue;
+            it->st = css_compute_box(&b->doc->css, dom, c, st, &it->box);
+            if (it->st.hidden || it->box.hide || it->box.display == DISPLAY_NONE) continue;
+            it->out = it->box.positioned;
+        }
+        /* insertion by order, keeping document order for equal ones;
+           positioned children go last */
+        flex_item moving = *it;
+        int i = n;
+        while (i > 0 && (items[i - 1].out > moving.out || (items[i - 1].out == moving.out && items[i - 1].box.order > moving.box.order))) { items[i] = items[i - 1]; i--; }
+        items[i] = moving;
+        n++;
+    }
+    *child = c;
+    return n;
+}
+
+static void measure_item(builder *b, flex_item *it, int width, int column);
+static int place_item(builder *b, flex_item *it, browser_style parent, float x, int y);
+static int resolve(int value, int width) { return value >= 0 ? value : width * -value / 100; }
+static float clampf(float v, float low, float high) { return v < low ? low : v > high ? high : v; }
+
+/* Positioned children of a flex or grid container, below its rows: as wide as
+   their content, within the page rather than the container (a narrow one
+   would break their words up), from the container's left edge where they fit. */
+static void out_of_flow(builder *b, flex_item *items, int from, int n, browser_style st, int x)
+{
+    int page = b->v->width - 8;
+    for (int i = from; i < n && !b->failed; i++) {
+        flex_item *it = &items[i];
+        measure_item(b, it, page, 0);
+        float room = (float)(page - it->ml - it->mr);
+        it->size = it->box.width ? clampf((float)resolve(it->box.width, page), 8, room) : clampf(it->base, 8, room);
+        float outer = it->size + it->ml + it->mr, left = (float)x;
+        if (left + outer > page + 4) left = page + 4 - outer;
+        it->auto_left = it->auto_right = 0;
+        *b->y += place_item(b, it, st, left + it->ml, *b->y);
+    }
+}
+static int in_flow(const flex_item *items, int n)
+{
+    while (n > 0 && items[n - 1].out) n--;
+    return n;
+}
+
+/* An item's margins, and the narrowest, preferred and widest widths of its
+   border box in a container `width` wide. */
+static void measure_item(builder *b, flex_item *it, int width, int column)
+{
+    browser_box *box = &it->box;
+    const dom_node *n = &b->dom->nodes[it->node];
+    it->grow = it->text ? 0 : box->grow / 100.0f;
+    it->shrink = it->text || !(box->flex & FLEX_SHRINK_SET) ? 1 : box->shrink / 100.0f;
+    it->max = 100000;
+    if (it->text) {
+        float lo = 0, hi = 0, line = 0;
+        content_widths(b, it->node, it->st, &lo, &hi, &line, 1);
+        it->min = lo; it->base = hi;
+        return;
+    }
+    default_box(n, box);
+    it->auto_left = box->margin[3] == BOX_AUTO; it->auto_right = box->margin[1] == BOX_AUTO;
+    it->ml = it->auto_left ? 0 : clampi(box->margin[3], 0, 120);
+    it->mr = it->auto_right ? 0 : clampi(box->margin[1], 0, 120);
+    int sized = box->width ? resolve(box->width, width) : -1, specified = sized;
+    if (!column && (box->flex & FLEX_BASIS_SET) && box->basis != BOX_AUTO) specified = resolve(box->basis, width);
+    if (box->max_width) it->max = (float)resolve(box->max_width, width);
+    float lo = 0, hi = 0;
+    int h;
+    if (is(n, "img")) lo = hi = (float)image_size(b, it->node, box, 0, &h);
+    else if (is(n, "input") || is(n, "select") || is(n, "textarea") || is(n, "button")) lo = hi = (float)field_size(b, it->node, box, 0, &h);
+    else if ((hi = icon_width(b, it->node, it->st)) >= 0) {
+        lo = hi;
+        lo += box->padding[1] + box->padding[3] + box->border[1] + box->border[3];
+        hi = lo;
+    } else {
+        hi = 0;
+        int budget = b->budget;
+        if (budget <= 0) b->budget = MEASURE_BUDGET;
+        inner_widths(b, it->node, it->st, box, &lo, &hi, 1);
+        if (b->budget < 0) { hi = (float)width; if (lo > width / 2) lo = (float)(width / 2); }
+        b->budget = budget > 0 ? b->budget : 0;
+        int sides = box->padding[1] + box->padding[3] + box->border[1] + box->border[3];
+        lo += sides; hi += sides;
+    }
+    it->base = specified >= 0 ? (float)specified : hi;
+    /* min-width: auto is the narrowest content, or the width when narrower
+       (a flex-basis of 0 doesn't let an item shrink below its content). A
+       smaller min-width (0, to let long text shrink) would break words into
+       letters here, where a computer lets them overflow: text keeps its
+       longest word, while pictures and fields shrink. */
+    it->min = sized >= 0 && sized < lo ? (float)sized : lo;
+    if (box->flex & MIN_WIDTH_SET) {
+        float given = (float)resolve(box->min_width, width);
+        if (given > it->min || replaced(n)) it->min = given;
+    }
+    if (it->max < it->min) it->max = it->min;
+}
+
+/* Lays out an item as a block `it->size` wide at (x, y): its height with margins. */
+static int place_item(builder *b, flex_item *it, browser_style parent, float x, int y)
+{
+    int *outer_y = b->y, iy = y;
+    int ml = it->auto_left ? 0 : it->ml, mr = it->auto_right ? 0 : it->mr;
+    int box_item = !it->text && !replaced(&b->dom->nodes[it->node]);
+    /* a block takes its margins off the room it's given; text and fields don't */
+    /* whole pixels, rounded up so that the widest line still fits */
+    line_state line = { .x = (int)(x + 0.5f) - (box_item ? ml : 0), .width = (int)(it->size + 0.99f) + (box_item ? ml + mr : 0),
+                        .align = parent.align, .first = b->piece_count };
+    if (line.width < 8) line.width = 8;
+    line_state *outer = b->line;
+    b->line = &line; b->y = &iy; b->collapse = 0;
+    it->first = b->v->item_count;
+    b->last.node = -1;
+    if (it->text) add_text(b, b->dom->nodes[it->node].text, parent);
+    else { b->item_width = (int)(it->size + 0.99f); element_styled(b, it->node, parent, it->st, it->box); b->item_width = -1; }
+    flush_line(b);
+    it->last = b->v->item_count;
+    it->record = b->last.node == it->node;
+    if (it->record) { it->background = b->last.background; memcpy(it->border, b->last.border, sizeof(it->border)); }
+    b->line = outer; b->y = outer_y;
+    it->height = iy - y;
+    return it->height;
+}
+
+/* Items in a row share its height: stretched (their background and borders
+   reach the bottom) or placed at its top, middle or bottom. */
+static void align_row(builder *b, flex_item *items, int count, int align, int row_height)
+{
+    browser_view *v = b->v;
+    for (int i = 0; i < count; i++) {
+        flex_item *it = &items[i];
+        int delta = row_height - it->height, how = it->box.align_self ? it->box.align_self - 1 : align;
+        if (delta <= 0) continue;
+        if (how == 0 && it->record && !it->box.height) {
+            if (it->background >= 0) v->items[it->background].h += delta;
+            if (it->border[2] >= 0) v->items[it->border[2]].y += delta;
+            if (it->border[1] >= 0) v->items[it->border[1]].h += delta;
+            if (it->border[3] >= 0) v->items[it->border[3]].h += delta;
+        } else if (how == 2 || how == 3) {
+            int shift = how == 2 ? delta / 2 : delta;
+            for (int k = it->first; k < it->last; k++) v->items[k].y += shift;
+        }
+    }
+}
+
+static int takes_room(const flex_item *it)
+{
+    return it->text || it->base + it->ml + it->mr > 0.5f || it->min > 0.5f || it->grow > 0 || it->box.width || it->box.height > 0;
+}
+
+
+/* A column: one item per row, as wide as the container, or as its content
+   when it's aligned to a side or centered. */
+static void flex_column(builder *b, flex_item *items, int n, browser_style st, const browser_box *box, int x, int width)
+{
+    int *y = b->y;
+    for (int i = 0; i < n && !b->failed; i++) {
+        flex_item *it = &items[i];
+        int how = it->box.align_self ? it->box.align_self - 1 : box->align, room = width - it->ml - it->mr;
+        float w = it->box.width ? clampf((float)resolve(it->box.width, width), it->min, it->max) : how == 0 ? (float)room : clampf(it->base, it->min, it->max);
+        it->size = clampf(w, 8, room > 8 ? (float)room : 8);
+        float free = (float)room - it->size, left = how == 2 ? free / 2 : how == 3 ? free : 0;
+        if (it->auto_left && it->auto_right) left = free / 2;
+        else if (it->auto_left) left = free;
+        if (i) *y += box->row_gap;
+        place_item(b, it, st, (float)(x + it->ml) + left, *y);
+        *y += it->height;
+    }
+}
+
+/* Rows across `width`, wrapping when items don't fit even at their narrowest. */
+static void flex_rows(builder *b, flex_item *items, int n, browser_style st, const browser_box *box, int x, int width)
+{
+    /* gaps separate the items that take room; ones that show nothing
+       (an icon button without a name) don't get one */
+    float need = 0;
+    for (int i = 0, any = 0; i < n; i++)
+        if (takes_room(&items[i])) { need += items[i].min + items[i].ml + items[i].mr + (any ? box->gap : 0); any = 1; }
+    /* nowrap would push items off the screen, which doesn't scroll sideways */
+    int wrap = box->wrap || need > width;
+    int top = *b->y;
+    for (int start = 0; start < n && !b->failed;) {
+        int end = start, gaps = -1;
+        float used = 0;
+        for (; end < n; end++) {
+            flex_item *it = &items[end];
+            if (!takes_room(it)) continue;
+            float outer = clampf(it->base, it->min, it->max) + it->ml + it->mr;
+            if (wrap && gaps >= 0 && used + box->gap + outer > width) break;
+            used += (gaps >= 0 ? box->gap : 0) + outer;
+            gaps++;
+        }
+        if (gaps < 0) gaps = 0;
+        int count = end - start;
+        flex_item *row = &items[start];
+        /* grow into the free space, or shrink to fit */
+        for (int i = 0; i < count; i++) { row[i].size = clampf(row[i].base, row[i].min, row[i].max); row[i].frozen = 0; }
+        for (int pass = 0; pass < 4; pass++) {
+            float free = (float)width - box->gap * gaps, weight = 0;
+            for (int i = 0; i < count; i++) free -= row[i].size + row[i].ml + row[i].mr;
+            if (free > 0.5f) for (int i = 0; i < count; i++) weight += row[i].frozen ? 0 : row[i].grow;
+            else if (free < -0.5f) for (int i = 0; i < count; i++) weight += row[i].frozen ? 0 : row[i].shrink * row[i].size;
+            if (weight <= 0) break;
+            for (int i = 0; i < count; i++) {
+                flex_item *it = &row[i];
+                if (it->frozen) continue;
+                float share = free > 0 ? free * it->grow / weight : free * it->shrink * it->size / weight, size = it->size + share;
+                if (size < it->min || size > it->max) { size = clampf(size, it->min, it->max); it->frozen = 1; }
+                it->size = size;
+            }
+        }
+        /* never wider than the container: a long word breaks instead */
+        for (int i = 0; i < count; i++) {
+            float limit = (float)(width - row[i].ml - row[i].mr);
+            if (row[i].size > limit) row[i].size = limit > 8 ? limit : 8;
+        }
+        /* what's left goes to auto margins, else justify-content spreads it */
+        float free = (float)width - box->gap * gaps;
+        int autos = 0;
+        for (int i = 0; i < count; i++) { free -= row[i].size + row[i].ml + row[i].mr; autos += row[i].auto_left + row[i].auto_right; }
+        float offset = 0, between = 0, margin = 0;
+        if (free > 0 && autos) margin = free / autos;
+        else if (free > 0) {
+            switch (box->justify) {
+            case 2: offset = free / 2; break;
+            case 3: offset = free; break;
+            case 4: if (gaps > 0) between = free / gaps; break;
+            case 5: between = free / (gaps + 1); offset = between / 2; break;
+            case 6: between = free / (gaps + 2); offset = between; break;
+            }
+        }
+        float cursor = (float)x + offset;
+        int height = 0, placed = 0;
+        for (int i = 0; i < count && !b->failed; i++) {
+            flex_item *it = &row[i];
+            int room = takes_room(it);
+            if (room && placed) cursor += box->gap + between;
+            cursor += it->ml + (it->auto_left ? margin : 0);
+            place_item(b, it, st, cursor, top);
+            if (it->height > height) height = it->height;
+            cursor += it->size + it->mr + (it->auto_right ? margin : 0);
+            placed |= room;
+        }
+        align_row(b, row, count, box->align, height);
+        top += height;
+        start = end;
+        if (start < n) top += box->row_gap;
+    }
+    *b->y = top;
+}
+
+/* A flex container: its items in rows, or stacked when it's a column. More
+   children than ITEMS_MAX are laid out in turns. */
+static void flex(builder *b, int node, browser_style st, const browser_box *box, int x, int width)
+{
+    /* too narrow to share: the normal flow */
+    if (width < 24 || b->depth >= DOM_DEPTH_MAX) { children(b, node, st); return; }
+    flex_item *items = malloc(ITEMS_MAX * sizeof(*items));
+    if (!items) { b->failed = 1; return; }
+    b->depth++;
+    int column = box->direction >= 2, laid = 0;
+    for (int child = b->dom->nodes[node].first; child >= 0 && !b->failed;) {
+        int all = collect_items(b, st, items, &child), n = in_flow(items, all);
+        if (box->direction == 1 || box->direction == 3)
+            for (int i = 0; i < n / 2; i++) { flex_item t = items[i]; items[i] = items[n - 1 - i]; items[n - 1 - i] = t; }
+        for (int i = 0; i < n; i++) {
+            flex_item *it = &items[i];
+            /* a stretched item of a column is as wide as the container: its
+               content needn't be measured */
+            int how = it->box.align_self ? it->box.align_self - 1 : box->align;
+            if (column && !it->text && how == 0 && it->box.margin[1] != BOX_AUTO && it->box.margin[3] != BOX_AUTO) {
+                default_box(&b->dom->nodes[it->node], &it->box);
+                it->ml = clampi(it->box.margin[3], 0, 120); it->mr = clampi(it->box.margin[1], 0, 120);
+                it->min = 0; it->max = it->box.max_width ? (float)resolve(it->box.max_width, width) : 100000;
+                it->base = (float)width;
+                continue;
+            }
+            measure_item(b, it, width, column);
+        }
+        if (n && laid) *b->y += box->row_gap;
+        if (column) flex_column(b, items, n, st, box, x, width);
+        else flex_rows(b, items, n, st, box, x, width);
+        laid |= n > 0;
+        b->collapse = 0;
+        out_of_flow(b, items, n, all, st, x);
+    }
+    b->collapse = 0;
+    b->depth--;
+    free(items);
+}
+
+/* A grid container: its items in rows of the columns grid-template-columns
+   gives, each spanning one or more. */
+static void grid(builder *b, int node, browser_style st, const browser_box *box, int x, int width)
+{
+    if (width < 24 || b->depth >= DOM_DEPTH_MAX) { children(b, node, st); return; }
+    flex_item *items = malloc(ITEMS_MAX * sizeof(*items));
+    if (!items) { b->failed = 1; return; }
+    b->depth++;
+    int gap = box->gap;
+    /* the columns */
+    unsigned char kind[GRID_TRACKS];
+    short value[GRID_TRACKS];
+    int count = box->tracks;
+    memcpy(kind, box->track_kind, sizeof(kind));
+    memcpy(value, box->track, sizeof(value));
+    if (box->fill > 0) {
+        count = (width + gap) / (box->fill + gap);
+        count = clampi(count, 1, GRID_TRACKS);
+        for (int i = 0; i < count; i++) { kind[i] = TRACK_FR; value[i] = 100; }
+    }
+    if (count <= 0) { count = 1; kind[0] = TRACK_FR; value[0] = 100; }
+    int shares = 1;
+    for (int i = 0; i < count; i++) shares &= kind[i] == TRACK_FR || kind[i] == TRACK_AUTO;
+    /* columns of equal shares narrower than a few words are merged */
+    while (shares && count > 1 && (width - gap * (count - 1)) / count < 56) count--;
+    float col[GRID_TRACKS], fixed = 0, fr = 0;
+    for (int i = 0; i < count; i++) {
+        if (kind[i] == TRACK_PX) fixed += value[i];
+        else if (kind[i] == TRACK_PERCENT) fixed += (float)width * value[i] / 100;
+        else fr += kind[i] == TRACK_FR ? value[i] : 100;
+    }
+    float room = (float)(width - gap * (count - 1)), left = room - fixed > 0 ? room - fixed : 0;
+    float scale = fixed > room && fixed > 0 ? room / fixed : 1;
+    for (int i = 0; i < count; i++) {
+        if (kind[i] == TRACK_PX) col[i] = value[i] * scale;
+        else if (kind[i] == TRACK_PERCENT) col[i] = (float)width * value[i] / 100 * scale;
+        else col[i] = fr > 0 ? left * (kind[i] == TRACK_FR ? value[i] : 100) / fr : 0;
+    }
+    int *y = b->y, top = *y, laid = 0;
+    for (int child = b->dom->nodes[node].first; child >= 0 && !b->failed;) {
+    int all = collect_items(b, st, items, &child), n = in_flow(items, all);
+    if (n && laid) top += box->row_gap;
+    laid |= n > 0;
+    for (int start = 0; start < n && !b->failed;) {
+        int end = start, used = 0;
+        float position[ITEMS_MAX];
+        for (; end < n; end++) {
+            flex_item *it = &items[end];
+            int span = it->box.span == SPAN_ROW ? count : clampi(it->box.span ? it->box.span : 1, 1, count);
+            if (used + span > count && end > start) break;
+            float area_x = (float)x, area_w = (float)(gap * (span - 1));
+            for (int k = 0; k < used; k++) area_x += col[k] + gap;
+            for (int k = used; k < used + span; k++) area_w += col[k];
+            if (!it->text) {
+                default_box(&b->dom->nodes[it->node], &it->box);
+                it->auto_left = it->box.margin[3] == BOX_AUTO; it->auto_right = it->box.margin[1] == BOX_AUTO;
+                it->ml = it->auto_left ? 0 : clampi(it->box.margin[3], 0, 120);
+                it->mr = it->auto_right ? 0 : clampi(it->box.margin[1], 0, 120);
+            }
+            it->size = area_w - it->ml - it->mr;
+            if (it->box.width > 0 && it->box.width < it->size) it->size = it->box.width;
+            if (it->size < 8) it->size = 8;
+            position[end - start] = area_x + it->ml;
+            used += span;
+        }
+        int height = 0;
+        for (int i = start; i < end && !b->failed; i++) {
+            place_item(b, &items[i], st, position[i - start], top);
+            if (items[i].height > height) height = items[i].height;
+        }
+        align_row(b, &items[start], end - start, box->align, height);
+        top += height;
+        start = end;
+        if (start < n) top += box->row_gap;
+    }
+    *y = top;
+    b->collapse = 0;
+    out_of_flow(b, items, n, all, st, x);
+    top = *y;
+    }
+    b->collapse = 0;
+    b->depth--;
+    free(items);
+}
+
+/* A floated box: as wide as it says or as its content, at the left or right
+   of the room where it fits, with the following lines beside it. */
+static void float_box(builder *b, int node, browser_style parent, browser_style st, browser_box box)
+{
+    line_state *l = b->line;
+    if (b->float_count >= FLOATS_MAX) {
+        /* too many: laid out where it is, as a block */
+        box.float_side = 0;
+        int x = l->full ? l->full_x : l->x, width = l->full ? l->full_width : l->width;
+        flush_line(b);
+        block(b, node, st, &box, x, width);
+        return;
+    }
+    flush_line(b);
+    int room_x = l->full ? l->full_x : l->x, room = l->full ? l->full_width : l->width;
+    flex_item it;
+    memset(&it, 0, sizeof(it));
+    it.node = node; it.st = st; it.box = box;
+    measure_item(b, &it, room, 0);
+    int outer_room = room - it.ml - it.mr;
+    it.size = box.width ? clampf((float)resolve(box.width, room), 8, (float)outer_room) : clampf(it.base, it.min < outer_room ? it.min : 8, (float)outer_room);
+    if (it.size < 8) it.size = 8;
+    int outer = (int)(it.size + 0.5f) + it.ml + it.mr, y = *b->y, left, right;
+    for (int pass = 0; pass <= FLOATS_MAX; pass++) {
+        int next = band(b, y, room_x, room, &left, &right);
+        if (next < 0 || right - left >= outer) break;
+        y = next;
+    }
+    float x = box.float_side == 1 ? (float)(left + it.ml) : (float)(right - it.mr) - it.size;
+    int collapse = b->collapse, link = b->link, label = b->label;
+    it.auto_left = it.auto_right = 0;
+    place_item(b, &it, parent, x, y);
+    b->collapse = collapse; b->link = link; b->label = label;
+    float_area *f = &b->floats[b->float_count++];
+    f->x = (int)(x + 0.5f) - it.ml; f->y = y; f->w = outer; f->h = it.height; f->side = box.float_side;
 }
 
 static int collect_rows(builder *b, int node, int *rows, int count, int max, int depth)
@@ -1251,7 +1881,14 @@ int browser_view_build(browser_view *v, const browser_document *doc, int width, 
     v->forms = calloc(VIEW_FORMS_MAX, sizeof(*v->forms));
     v->anchors = calloc(VIEW_ANCHORS_MAX, sizeof(*v->anchors));
     int *control_of = malloc((size_t)doc->dom->count * sizeof(int));
+    if (b) {
+        /* optional: without it, content is measured again where needed */
+        b->measured = malloc((size_t)doc->dom->count * sizeof(*b->measured));
+        b->known = calloc((size_t)doc->dom->count, 1);
+        if (!b->measured || !b->known) { free(b->measured); free(b->known); b->measured = NULL; b->known = NULL; }
+    }
     if (!b || !v->items || !v->links || !v->controls || !v->options || !v->forms || !v->anchors || !control_of) {
+        if (b) { free(b->measured); free(b->known); }
         free(b); free(control_of); browser_view_free(v);
         snprintf(err, errlen, "Not enough memory to lay out the page.");
         return -1;
@@ -1261,6 +1898,7 @@ int browser_view_build(browser_view *v, const browser_document *doc, int width, 
     v->ink = 0xff000000;
     b->v = v; b->doc = doc; b->dom = doc->dom; b->measure = measure; b->control_of = control_of;
     b->link = b->label = -1; b->scripting = doc->scripting;
+    b->item_width = -1; b->last.node = -1;
     strcpy(b->base, doc->url);
     for (int i = 0; i < doc->dom->count; i++)
         if (is(&doc->dom->nodes[i], "base") && *dom_attr(&doc->dom->nodes[i], "href")) {
@@ -1283,7 +1921,7 @@ int browser_view_build(browser_view *v, const browser_document *doc, int width, 
         flush_line(b);
     }
     int failed = b->failed;
-    free(control_of); free(b);
+    free(control_of); free(b->measured); free(b->known); free(b);
     if (failed) { browser_view_free(v); snprintf(err, errlen, "Not enough memory to lay out the page."); return -1; }
     v->height = y + 8;
     v->reach = malloc(((size_t)v->item_count + 1) * sizeof(int));

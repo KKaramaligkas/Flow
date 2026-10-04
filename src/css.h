@@ -47,16 +47,39 @@ typedef struct { size_t offset; browser_style style; } browser_span;
    below zero are percentages of the containing block. Not inherited. */
 #define BOX_AUTO (-32768)
 enum { DISPLAY_DEFAULT, DISPLAY_BLOCK, DISPLAY_INLINE, DISPLAY_INLINE_BLOCK, DISPLAY_LIST_ITEM,
-       DISPLAY_TABLE, DISPLAY_ROW, DISPLAY_CELL, DISPLAY_FLEX, DISPLAY_NONE };
+       DISPLAY_TABLE, DISPLAY_ROW, DISPLAY_CELL, DISPLAY_FLEX, DISPLAY_NONE, DISPLAY_GRID };
+/* How an element lays out its children: display's inner part (inline-flex
+   is an inline-block whose children are flex items). */
+enum { INNER_FLOW, INNER_FLEX, INNER_GRID };
+enum { TRACK_PX, TRACK_PERCENT, TRACK_FR, TRACK_AUTO };
+#define GRID_TRACKS 8
+#define FLEX_SHRINK_SET 1       /* browser_box.flex: flex-shrink given (else 1) */
+#define FLEX_BASIS_SET 2        /* flex-basis given (else auto) */
+#define MIN_WIDTH_SET 4         /* min-width given (else auto) */
+#define SPAN_ROW 255            /* grid-column: 1 / -1 */
 typedef struct {
     short margin[4], padding[4];        /* top, right, bottom, left */
     unsigned char border[4];
     uint32_t border_color[4];
     short width, max_width, height;     /* 0 when not set */
     unsigned char display, set, hide;   /* set: bit i = margin side i, bit 4+i = padding side i */
-    unsigned char justify;              /* flex justify-content: 1 start, 2 center, 3 end */
-    short gap;                          /* flex/grid gap between the children */
+    unsigned char justify;              /* justify-content: 1 start, 2 center, 3 end, 4 space-between, 5 space-around, 6 space-evenly */
+    short gap, row_gap;                 /* flex/grid gaps between columns and between rows */
     unsigned char plain;                /* 1 appearance:none, 2 no border, 4 no background (a button styled as text) */
+    /* flex and grid containers */
+    unsigned char inner, direction, wrap; /* direction: 0 row, 1 row-reverse, 2 column, 3 column-reverse */
+    unsigned char align;                /* align-items: 0 stretch, 1 start, 2 center, 3 end */
+    unsigned char tracks, track_kind[GRID_TRACKS];  /* grid-template-columns */
+    short track[GRID_TRACKS];           /* layout pixels, percent, or fr in hundredths */
+    short fill;                         /* repeat(auto-fill, minmax(fill, 1fr)): the narrowest column */
+    /* flex and grid items, and floats */
+    unsigned char flex, align_self;     /* flex: *_SET bits; align_self: 0 auto, else align + 1 */
+    unsigned char span;                 /* grid columns spanned (0 or 1: one), SPAN_ROW: all */
+    unsigned char float_side, clear;    /* float_side: 1 left, 2 right; clear: 1 left, 2 right, 3 both */
+    unsigned char positioned;           /* position: absolute or fixed (out of a flex or grid's rows) */
+    short grow, shrink;                 /* hundredths */
+    short basis, min_width;             /* layout pixels, -percent, or BOX_AUTO */
+    short order;
 } browser_box;
 
 void css_free(browser_css *);

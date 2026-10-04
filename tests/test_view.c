@@ -405,9 +405,205 @@ static void readability(void)
     drop(p);
 }
 
+static const view_item *find_rect(const browser_view *v, uint32_t color)
+{
+    for (int i = 0; i < v->item_count; i++) if (v->items[i].kind == ITEM_RECT && v->items[i].color == color) return &v->items[i];
+    return NULL;
+}
+
+static void flex_and_grid(void)
+{
+    /* a navigation bar: the links side by side */
+    page *p = load("<nav style='display:flex;gap:10px'><a href=/a>Home</a><a href=/b>About</a><a href=/c>Contact</a></nav><p>after</p>",
+                   "https://example.org/", 0);
+    browser_view *v = &p->view;
+    sane(v);
+    const view_item *home = find_text(v, "Home"), *about = find_text(v, "About"), *contact = find_text(v, "Contact"), *after = find_text(v, "after");
+    CHECK(home && about && contact && after);
+    if (home && about && contact && after) {
+        CHECK(home->y == about->y && about->y == contact->y);
+        CHECK(about->x >= home->x + home->w + 6 && contact->x >= about->x + about->w + 6);
+        CHECK(after->y > home->y + home->h - 1);
+    }
+    drop(p);
+    /* space-between: the first item at the left, the last at the right */
+    p = load("<div style='display:flex;justify-content:space-between'><span>left</span><span>middle</span><span>right</span></div>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *left = find_text(v, "left"), *right = find_text(v, "right"), *middle = find_text(v, "middle");
+    CHECK(left && right && middle && left->x <= 6 && right->x + right->w >= VIEW_WIDTH - 6 && middle->x > 150 && middle->x < 300);
+    drop(p);
+    /* flex: 1 shares the row equally; a gap between */
+    p = load("<div style='display:flex;gap:20px'><div style='flex:1;background:#ff0000'>one</div><div style='flex:1;background:#00ff00'>two</div></div>",
+             "https://example.org/", 0);
+    v = &p->view;
+    const view_item *red = find_rect(v, 0xff0000ff), *green = find_rect(v, 0xff00ff00);
+    CHECK(red && green);
+    if (red && green) {
+        CHECK(red->y == green->y && abs(red->w - green->w) <= 1);
+        CHECK(green->x - (red->x + red->w) >= 11 && green->x - (red->x + red->w) <= 13);    /* 20 CSS pixels */
+        CHECK(red->w + green->w + 12 >= VIEW_WIDTH - 10);
+    }
+    drop(p);
+    /* margin-left: auto pushes an item to the right; order moves one first */
+    p = load("<header style='display:flex'><b>Logo</b><a href=/in style='margin-left:auto'>Sign in</a><i style='order:-1'>menu</i></header>",
+             "https://example.org/", 0);
+    v = &p->view;
+    const view_item *logo = find_text(v, "Logo"), *sign = find_text(v, "Sign in"), *menu = find_text(v, "menu");
+    CHECK(logo && sign && menu && sign->x + sign->w >= VIEW_WIDTH - 6 && menu->x < logo->x && menu->y == logo->y);
+    drop(p);
+    /* a column centered by align-items */
+    p = load("<div style='display:flex;flex-direction:column;align-items:center;gap:8px'><div>top</div><div>bottom</div></div>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *top = find_text(v, "top"), *bottom = find_text(v, "bottom");
+    CHECK(top && bottom && top->x > 200 && bottom->x > 180 && bottom->y >= top->y + top->h + 4);
+    drop(p);
+    /* cards in a row are stretched to the same height; centered items sit in the middle */
+    p = load("<div style='display:flex'><div style='flex:1;background:#ff0000'>short</div>"
+             "<div style='flex:1;background:#00ff00'>a much longer card text that wraps onto several lines in this narrow column of the row</div></div>"
+             "<div style='display:flex;align-items:center'><div style='width:100px'>mid</div><div style='width:100px'>one two three four five six seven eight nine ten</div></div>",
+             "https://example.org/", 0);
+    v = &p->view;
+    red = find_rect(v, 0xff0000ff); green = find_rect(v, 0xff00ff00);
+    CHECK(red && green && red->h == green->h && red->h > 30);
+    const view_item *mid = find_text(v, "mid"), *one = find_text(v, "one two");
+    CHECK(mid && one && mid->y > one->y + 10);
+    drop(p);
+    /* items that don't fit even at their narrowest wrap, though nowrap: the screen doesn't scroll sideways */
+    p = load("<ul style='display:flex;list-style:none'><li>Documentation</li><li>Downloads</li><li>Community</li><li>Contributing</li>"
+             "<li>Security</li><li>Certification</li><li>Organization</li><li>Sponsorship</li></ul>", "https://example.org/", 0);
+    v = &p->view;
+    sane(v);
+    const view_item *docs = find_text(v, "Documentation"), *sponsor = find_text(v, "Sponsorship");
+    CHECK(docs && sponsor && sponsor->y > docs->y);
+    drop(p);
+    /* flex: 0 0 200px is fixed; the other item takes the rest */
+    p = load("<div style='display:flex'><div style='flex:0 0 200px;background:#ff0000'>side</div><div style='flex:1;background:#00ff00'>main</div></div>",
+             "https://example.org/", 0);
+    v = &p->view;
+    red = find_rect(v, 0xff0000ff); green = find_rect(v, 0xff00ff00);
+    CHECK(red && green && red->w == 120 && green->x == red->x + 120 && green->x + green->w >= VIEW_WIDTH - 6);
+    drop(p);
+    /* a grid of three columns: six items in two rows */
+    p = load("<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:10px'>"
+             "<div>c1</div><div>c2</div><div>c3</div><div>c4</div><div>c5</div><div>c6</div></div>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *c1 = find_text(v, "c1"), *c2 = find_text(v, "c2"), *c3 = find_text(v, "c3"), *c4 = find_text(v, "c4");
+    CHECK(c1 && c2 && c3 && c4);
+    if (c1 && c2 && c3 && c4) {
+        CHECK(c1->y == c2->y && c2->y == c3->y && c4->y > c1->y && c4->x == c1->x);
+        CHECK(c2->x - c1->x >= 150 && c2->x - c1->x <= 160 && abs((c3->x - c2->x) - (c2->x - c1->x)) <= 1);
+    }
+    drop(p);
+    /* auto-fill columns at least 200 CSS pixels wide, and an item spanning the row */
+    p = load("<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr))'>"
+             "<div style='grid-column:1/-1;background:#ff0000'>banner</div><div>a1</div><div>a2</div><div>a3</div><div>a4</div></div>",
+             "https://example.org/", 0);
+    v = &p->view;
+    red = find_rect(v, 0xff0000ff);
+    const view_item *a1 = find_text(v, "a1"), *a3 = find_text(v, "a3"), *a4 = find_text(v, "a4");
+    CHECK(red && red->w >= VIEW_WIDTH - 10 && a1 && a3 && a4 && a1->y == a3->y && a4->y > a1->y && a1->y > red->y);
+    drop(p);
+    /* fixed and flexible columns: 100px 1fr */
+    p = load("<div style='display:grid;grid-template-columns:100px 1fr'><div>label</div><div>value</div></div>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *label = find_text(v, "label"), *value = find_text(v, "value");
+    CHECK(label && value && value->y == label->y && value->x == label->x + 60);
+    drop(p);
+}
+
+static void floats(void)
+{
+    /* text beside a floated picture, then under it at full width */
+    page *p = load("<p><img style='float:left;margin-right:10px' width=100 height=80 alt=pic>"
+                   "word word word word word word word word word word word word word word word word word word word word word word word "
+                   "word word word word word word word word word word word word word word word word word word word word word word word "
+                   "word word word word word word word word word word word word word word word word word word word word word word word "
+                   "word word word word word word word word word word word word word word word word word word word word word word word "
+                   "word word word word word word word word word word word word word word word word word word word word word word end</p><p>next</p>",
+                   "https://example.org/", 0);
+    browser_view *v = &p->view;
+    sane(v);
+    const view_item *pic = NULL, *first = find_text(v, "word"), *end = NULL, *next = find_text(v, "next");
+    for (int i = 0; i < v->item_count; i++) {
+        if (v->items[i].kind == ITEM_IMAGE) pic = &v->items[i];
+        if (v->items[i].kind == ITEM_TEXT && memmem(v->text + v->items[i].text, (size_t)v->items[i].length, "end", 3)) end = &v->items[i];
+    }
+    CHECK(pic && first && end && next);
+    if (pic && first && end && next) {
+        CHECK(pic->x == 4 && pic->w == 60 && pic->h == 48);
+        CHECK(first->x >= pic->x + pic->w + 6 && first->y < pic->y + pic->h);
+        int below = 0;
+        for (int i = 0; i < v->item_count; i++) {
+            const view_item *it = &v->items[i];
+            if (it->kind != ITEM_TEXT) continue;
+            if (it->y < pic->y + pic->h) CHECK(it->x >= pic->x + pic->w);   /* nothing under the picture */
+            else if (it->x < pic->x + pic->w) below = 1;
+        }
+        CHECK(below && next->y >= end->y + end->h);
+    }
+    drop(p);
+    /* a sidebar floated right: the text stops before it */
+    p = load("<div style='float:right;width:30%;background:#ff0000'>side</div><p>main main main main main main main main main main main "
+             "main main main main main main main main main main main main main main</p>", "https://example.org/", 0);
+    v = &p->view;
+    sane(v);
+    const view_item *side = find_rect(v, 0xff0000ff);
+    CHECK(side && side->x + side->w >= VIEW_WIDTH - 5 && side->w >= 135 && side->w <= 142);
+    for (int i = 0; side && i < v->item_count; i++)
+        if (v->items[i].kind == ITEM_TEXT && v->items[i].y < side->y + side->h && !strncmp(v->text + v->items[i].text, "main", 4))
+            CHECK(v->items[i].x + v->items[i].w <= side->x + 1);
+    drop(p);
+    /* columns of floats side by side; clear puts what follows under them */
+    p = load("<div style='float:left;width:45%;background:#ff0000'>A<br>A<br>A</div><div style='float:left;width:45%;background:#00ff00'>B</div>"
+             "<div style='clear:both'>after</div>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *a = find_rect(v, 0xff0000ff), *b2 = find_rect(v, 0xff00ff00), *after = find_text(v, "after");
+    CHECK(a && b2 && after && a->y == b2->y && b2->x >= a->x + a->w && after->y >= a->y + a->h);
+    drop(p);
+    /* a block holds the floats in it */
+    p = load("<div style='background:#00ff00'><div style='float:left;width:50px;height:100px'>x</div></div><p>next</p>", "https://example.org/", 0);
+    v = &p->view;
+    const view_item *holder = find_rect(v, 0xff00ff00);
+    next = find_text(v, "next");
+    CHECK(holder && holder->h >= 60 && next && next->y >= holder->y + holder->h);
+    drop(p);
+}
+
+/* More nesting, items and floats than the limits, and nonsense values: laid out sanely. */
+static void layout_limits(void)
+{
+    size_t size = 400 * 1024, used = 0;
+    char *html = malloc(size);
+    CHECK(html != NULL);
+    if (!html) return;
+    used += (size_t)snprintf(html + used, size - used, "<style>.f{display:flex;flex:1 1 0;gap:3px}.g{display:grid;grid-template-columns:repeat(99,1fr)}"
+                             ".l{float:left;width:30px}.r{float:right;width:40%%}.x{flex:garbage;grid-column:9/2;order:abc;min-width:-5px;grid-template-columns:repeat(,)}</style>");
+    /* nested within the parser's depth limit */
+    for (int i = 0; i < 40; i++) used += (size_t)snprintf(html + used, size - used, "<div class=f>n%d", i);
+    for (int i = 0; i < 40; i++) used += (size_t)snprintf(html + used, size - used, "</div>");
+    used += (size_t)snprintf(html + used, size - used, "<div class=f>");
+    for (int i = 0; i < 200; i++) used += (size_t)snprintf(html + used, size - used, "<span>item%d</span>", i);
+    used += (size_t)snprintf(html + used, size - used, "</div><div class=g>");
+    for (int i = 0; i < 150; i++) used += (size_t)snprintf(html + used, size - used, "<div class=x>cell%d</div>", i);
+    used += (size_t)snprintf(html + used, size - used, "</div><div>");
+    for (int i = 0; i < 80; i++) used += (size_t)snprintf(html + used, size - used, "<div class=%s>fl%d</div>text%d ", i % 3 ? "l" : "r", i, i);
+    snprintf(html + used, size - used, "</div><p style='clear:both'>end</p>");
+    page *p = load(html, "https://example.org/", 0);
+    browser_view *v = &p->view;
+    sane(v);
+    CHECK(find_text(v, "item199") && find_text(v, "cell149") && find_text(v, "fl78") && find_text(v, "end"));
+    for (int i = 0; i < 40; i++) {
+        char nested[16];
+        snprintf(nested, sizeof(nested), "n%d", i);
+        CHECK(find_text(v, nested) || i > 20);   /* deep ones are too narrow for whole words */
+    }
+    drop(p);
+    free(html);
+}
+
 int main(void)
 {
-    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability();
+    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability(); flex_and_grid(); floats(); layout_limits();
     printf("view: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
