@@ -25,7 +25,7 @@
 #include "text.h"
 #include "util.h"
 
-PSP_MODULE_INFO("Flow",PSP_MODULE_USER,0,4);
+PSP_MODULE_INFO("Flow",PSP_MODULE_USER,0,5);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER|PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_THRESHOLD_SIZE_KB(4*1024);
 #define PAGE_LINES 16
@@ -69,6 +69,14 @@ static int callbacks(SceSize args,void *argp)
 }
 static void notice(const char *text) { pm_strlcpy(message,text,sizeof(message)); }
 static browser_view *view(void) { return page&&!reader?page->view:NULL; }
+/* A page that goes: the copy of a page in parts goes with it, unless `next`
+   (a part of the same page) reads it. */
+static void drop_page(browser_document *old,const browser_document *next)
+{
+    if(!old) return;
+    if(old->parts&&!(next&&next->parts&&!strcmp(next->parts->spool,old->parts->spool))) fs_remove(old->parts->spool);
+    browser_document_free(old); free(old);
+}
 
 /* ---- reader view ---- */
 
@@ -501,11 +509,28 @@ static void scroll_to(float y)
     if(y<0)y=0;
     scroll_target=y;
 }
+/* Part `part` (from 0) of the page shown, a page in parts. */
+static void show_part(int part)
+{
+    if(browser_jobs_busy()) return;
+    if(part<0||part>=page->parts->count) { notice("That part of the page isn't known yet."); return; }
+    if(part==page->part) { scroll_to(0); return; }
+    message[0]=0;
+    browser_script_free(page);
+    if(browser_pictures_stop(2000)==0) browser_pictures_release(page);
+    if(browser_jobs_part(page,part,javascript)<0) { notice("Could not open that part of the page."); browser_pictures(page); }
+}
 static void navigate(const char *url,int mode,const char *post)
 {
     char target[BROWSER_URL_MAX];
     if(browser_url_resolve(NULL,url,target,sizeof(target))<0) { notice("Unsupported or invalid link."); return; }
     const char *fragment=strchr(target,'#');
+    /* another part of a page shown in parts */
+    if(page&&page->parts&&fragment&&!post&&!strncmp(fragment,"#flow-part-",11)&&
+       !strncmp(page->url,target,(size_t)(fragment-target))&&(page->url[fragment-target]==0||page->url[fragment-target]=='#')) {
+        show_part(atoi(fragment+11)-1);
+        return;
+    }
     if(page&&fragment&&!post){char current[BROWSER_URL_MAX],next[BROWSER_URL_MAX];strcpy(current,page->url);strcpy(next,target);current[strcspn(current,"#")]=0;next[strcspn(next,"#")]=0;
         if(!strcmp(current,next)){
             if(page->view&&!reader){int y=browser_view_anchor(page->view,fragment+1);if(y>=0){scroll_to((float)y-4);scroll_y=scroll_target;}return;}
@@ -514,7 +539,8 @@ static void navigate(const char *url,int mode,const char *post)
             clamp_scroll();return;}}
     if(!connect_wifi() || exit_requested || browser_jobs_busy()) return;
     message[0]=0; failed_url[0]=0;
-    if(history.count) history.visits[history.current].scroll=(int)scroll_y;
+    /* where to come back to: a long page comes back at its first part */
+    if(history.count) history.visits[history.current].scroll=page->part?0:(int)scroll_y;
     /* the page's scripts are done: their memory is the next page's */
     browser_script_free(page);
     /* this page's pictures make room for the next page */
@@ -582,7 +608,7 @@ static void home(void)
     if(!next) { notice("Not enough memory for the start page."); return; }
     if(browser_document_parse(next,html,strlen(html),"https://example.org/","text/html",err,sizeof(err))<0) { free(next); notice(err); return; }
     browser_build_view(next);
-    if(page) { browser_pictures_stop(-1); browser_pictures_forget(); browser_document_free(page); free(page); }
+    if(page) { browser_pictures_stop(-1); browser_pictures_forget(); drop_page(page,next); }
     page=next; memset(&history,0,sizeof(history)); scroll=0; scroll_y=scroll_target=0; selected=-1; link_list=0;
     message[0]=failed_url[0]=0; layout();
     browser_pictures(page);
@@ -601,7 +627,7 @@ static void replace_page(browser_document *next)
     browser_script_move(next,page);
     next->pictures=page->pictures; page->pictures=NULL;
     float shift=page->view&&next->view?anchor_shift(page->view,next->view):0;
-    browser_document_free(page); free(page); page=next;
+    drop_page(page,next); page=next;
     selected=-1; picker=-1; layout();
     scroll_by(shift);
     update_hover();
@@ -626,25 +652,39 @@ static void collect(void)
 {
     if(!browser_work.finished) return;
     browser_document *loaded=browser_work.page;
+    if(browser_work.type==BROWSER_JOB_PART) {
+        browser_work.finished=0;
+        if(browser_work.result==0&&loaded) {
+            browser_work.page=NULL;
+            browser_pictures_forget(); drop_page(page,loaded); page=loaded;
+            selected=-1; link_list=0; picker=-1; scroll=0; layout(); scroll_y=scroll_target=0;
+            char text[96]; snprintf(text,sizeof(text),"Part %d of this page.",page->part+1); notice(text);
+        } else if(browser_work.cancel) notice("Cancelled. Your current page is unchanged.");
+        else notice(browser_work.error[0]?browser_work.error:"Could not read that part of the page.");
+        if(browser_work.page) { drop_page(browser_work.page,page); browser_work.page=NULL; }
+        browser_pictures(page);
+        return;
+    }
     if(browser_work.type==BROWSER_JOB_CLICK) {
         browser_work.finished=0;
         if(browser_work.result==0&&loaded) { browser_work.page=NULL; replace_page(loaded); }
         else if(browser_work.result==0) click_unhandled();
         else if(browser_work.cancel) notice("Cancelled. The page's script was stopped.");
         else notice(browser_work.error[0]?browser_work.error:"The page's script stopped.");
-        if(browser_work.page) { browser_document_free(browser_work.page); free(browser_work.page); browser_work.page=NULL; }
+        if(browser_work.page) { drop_page(browser_work.page,page); browser_work.page=NULL; }
         clicked_link=clicked_control=-1;
         if(!browser_jobs_busy()) browser_pictures(page);
         return;
     }
     if(browser_work.result==0 && browser_work.type==BROWSER_JOB_PAGE && loaded) {
         if(browser_history_commit(&history,browser_work.navigation,loaded->url)==0) {
-            browser_pictures_forget(); browser_document_free(page); free(page); page=loaded; browser_work.page=NULL;
+            browser_pictures_forget(); drop_page(page,loaded); page=loaded; browser_work.page=NULL;
             selected=-1; link_list=0; picker=-1; failed_url[0]=0; scroll=0; layout();
             scroll_y=scroll_target=0; scroll_to((float)history.visits[history.current].scroll); scroll_y=scroll_target;
             const char *fragment=strchr(page->url,'#');
             if(fragment&&page->view){int y=browser_view_anchor(page->view,fragment+1);if(y>=0){scroll_to((float)y-4);scroll_y=scroll_target;}}
             if(!page->view&&!reader) notice("This page is shown as text: there wasn't enough memory to lay it out.");
+            else if(page->parts) notice("This page is long, so it's shown in parts. The link at the end of a part, or Down there, goes on to the next.");
             else if(page->shortened) notice("Page shortened to fit PSP memory.");
             else if(page->scripts_failed) notice("Some scripts failed or exceeded PSP limits. Showing the page without them.");
             else if(page->view&&page->view->truncated) notice("Only the first part of this page fits in PSP memory.");
@@ -658,7 +698,7 @@ static void collect(void)
         notice(browser_work.error[0]?browser_work.error:"The request failed.");
         pm_strlcpy(failed_url,browser_work.url,sizeof(failed_url));
     }
-    if(browser_work.page) { browser_document_free(browser_work.page); free(browser_work.page); browser_work.page=NULL; }
+    if(browser_work.page) { drop_page(browser_work.page,page); browser_work.page=NULL; }
     browser_work.finished=0;
     browser_pictures(page);
 }
@@ -859,6 +899,13 @@ static void picker_input(const input_state *in)
 }
 static void page_input(const input_state *in)
 {
+    /* Down or Right at the end of a part of a long page: the next part */
+    const browser_view *v=page->view;
+    float last=v&&v->height>PAGE_H?(float)(v->height-PAGE_H):0;
+    if(page->parts&&page->part+1<page->parts->count&&(in->pressed&(PSP_CTRL_DOWN|PSP_CTRL_RIGHT))&&scroll_y>=last-0.5f) {
+        show_part(page->part+1);
+        return;
+    }
     move_cursor(in->lx,in->ly);
     if(in->repeat&PSP_CTRL_DOWN) scroll_to(scroll_target+40);
     else if(in->repeat&PSP_CTRL_UP) scroll_to(scroll_target-40);
@@ -908,6 +955,20 @@ static void menu_action(int choice)
     case M_EXIT: exit_requested=1; break;
     }
 }
+/* Copies of long pages a previous run left in the cache folder. */
+typedef struct { char names[16][64]; int count; } leftovers;
+static int leftover(void *ud,const char *name,int is_dir)
+{
+    leftovers *l=ud; size_t n=strlen(name);
+    if(!is_dir&&!strncmp(name,"long",4)&&n>4&&!strcmp(name+n-4,".tmp")&&n<sizeof(l->names[0])&&l->count<16) strcpy(l->names[l->count++],name);
+    return 0;
+}
+static void clean_cache(const char *dir)
+{
+    leftovers l; l.count=0;
+    fs_list(dir,leftover,&l);
+    for(int i=0;i<l.count;i++) { char path[320]; snprintf(path,sizeof(path),"%s%s",dir,l.names[i]); fs_remove(path); }
+}
 /* Flow was ARK Browser up to 0.3.1: take over the downloads and cookies left
    in its old folder (adopt.c). Copying shows its progress. */
 static void adopt_frame(void *ud,int index,int total)
@@ -947,6 +1008,7 @@ int main(int argc,char **argv)
     char cookies[256]; snprintf(cookies,sizeof(cookies),"%scookies.txt",app_dir); net_set_cookies(cookies);
     char cache_dir[256],cache[256];snprintf(cache_dir,sizeof(cache_dir),"%s.cache/",app_dir);
     int cache_ok=fs_mkdirs(cache_dir,NULL,NULL);snprintf(cache,sizeof(cache),"%s.cache/page.tmp",app_dir);
+    if(cache_ok>=0) clean_cache(cache_dir);
     home();
     if(text_fallback()) notice("No PSP fonts found (PPSSPP without a firmware): using a basic font. In PPSSPP, install a PSP firmware for nicer text.");
     adopt_ark_browser(); /* before the first request reads the cookie file */
@@ -998,6 +1060,6 @@ int main(int argc,char **argv)
         }
     }
     browser_work.cancel=1; browser_jobs_stop(); net_save_cookies(); net_term();
-    if(page) { browser_document_free(page); free(page); }
+    drop_page(page,NULL);
     text_term(); gfx_term(); sceKernelExitGame(); return 0;
 }

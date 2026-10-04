@@ -197,8 +197,8 @@ static void script_dom(void)
     CHECK(d->scripts_run==0&&d->scripts_failed==0&&strstr(d->text,"kept"));
     drop(d);
     /* A page too large for its scripts is shown as it is, without running them. */
-    size=7000*12+200;big=malloc(size);p=big;
-    for(int i=0;i<7000;i++)p+=sprintf(p,"<b>%d</b>",i%10);
+    size=3500*12+200;big=malloc(size);p=big;
+    for(int i=0;i<3500;i++)p+=sprintf(p,"<b>%d</b>",i%10);
     sprintf(p,"<p id=out>untouched</p><script>document.getElementById('out').textContent='ran';</script>");
     d=parse(big);
     CHECK(d->dom->count>6000);
@@ -324,4 +324,63 @@ static void browser_side(void)
     d=parse("<script>var a;</script>");CHECK(browser_scripts_present(d));drop(d);
     browser_script_setup(NULL,NULL,NULL,0);
 }
-int main(void){modern();mutation();fetching();modules();limits();styling();streaming();spans();layout();scripts_fit();dom_size();media();selectors();compacting();implied();script_dom();browser_side();printf("engine: %d checks, %d failures\n",checks,failures);return failures?1:0;}
+/* ---- a page too long for memory, read in parts ---- */
+typedef struct { const char *data; size_t length; } source;
+static int source_at(void *ud,size_t offset,char *out,size_t size){const source *m=ud;if(offset>=m->length)return 0;size_t n=m->length-offset;if(n>size)n=size;memcpy(out,m->data+offset,n);return (int)n;}
+/* The numbers of the items "item <n>" in a part, in order. */
+static int items_in(const browser_dom *dom,int *first,int *last){int count=0;*first=*last=-1;for(int i=0;i<dom->count;i++){const dom_node *n=&dom->nodes[i];int k;if(n->text&&sscanf(n->text,"item %d",&k)==1){if(*first<0)*first=k;if(k!=*last+1&&*last>=0)return -1;*last=k;count++;}}return count;}
+static void long_pages(void)
+{
+    /* 30,000 items of a list in a wrapper, after a head with styles */
+    size_t size=40*30000+400;char *html=malloc(size),*p=html;
+    p+=sprintf(p,"<!doctype html><html lang=en><head><title>Long</title><style>li{color:red}</style></head>\n<body class=\"b\"><div id=main class=\"wrap &amp; more\"><ul>");
+    for(int i=0;i<30000;i++)p+=sprintf(p,"<li>item %d</li>",i);
+    p+=sprintf(p,"</ul></div><p>The end.</p></body></html>");
+    source page={html,strlen(html)};
+    reader r={html,0,strlen(html),4096};
+    browser_document *d=calloc(1,sizeof(*d));char err[256];
+    CHECK(browser_document_load(d,reading,&r,"https://example.org/path/page","text/html",NULL,NULL,err,sizeof(err))==0);
+    CHECK(d->dom->cut>0&&d->dom->count<=DOM_PART_NODES+2);
+    CHECK(browser_parts_note(d,NULL,0,0)==0&&d->parts&&d->parts->count==2&&d->part==0);
+    CHECK(d->parts->head&&!strcmp(d->parts->head,"<html><head><title>Long</title><style>li{color:red}</style></head>"));     /* read before each part */
+    /* the elements open where it stopped, an item perhaps among them */
+    const char *open="<body class=\"b\"><div id=\"main\" class=\"wrap &amp; more\"><ul>";
+    CHECK(d->parts->part[1].context&&!strncmp(d->parts->part[1].context,open,strlen(open)));
+    browser_parts_links(d);
+    CHECK(browser_document_render(d,err,sizeof(err))==0);
+    CHECK(!d->shortened&&strstr(d->text,"Continue reading: part 2 of this page")&&!strstr(d->text,"Back to part"));
+    {int found=0;for(int i=0;i<d->count;i++)found|=!strcmp(d->links[i].url,"https://example.org/path/page#flow-part-2");CHECK(found);}
+    int first,last,seen=items_in(d->dom,&first,&last);
+    CHECK(seen>1000&&first==0);
+    /* each next part starts with the item after the last one before it,
+       inside the same wrappers, styled by the head */
+    browser_parts *parts=browser_parts_copy(d->parts);int part=1,expected=last+1,ended=0;
+    drop(d);
+    while(parts&&part<parts->count&&part<20){
+        browser_part_reader pr;browser_part_reader_init(&pr,parts,part,source_at,&page);
+        d=calloc(1,sizeof(*d));
+        CHECK(browser_document_load(d,browser_part_read,&pr,"https://example.org/path/page","text/html",NULL,NULL,err,sizeof(err))==0);
+        CHECK(browser_parts_note(d,parts,part,browser_part_prefix(&pr))==0&&d->parts&&d->part==part);
+        seen=items_in(d->dom,&first,&last);
+        CHECK(seen>0&&first==expected);
+        if(first!=expected)fprintf(stderr,"part %d starts at item %d, not %d\n",part,first,expected);
+        expected=last+1;
+        int li=-1;for(int i=0;i<d->dom->count&&li<0;i++)if(!strcmp(d->dom->nodes[i].tag,"li"))li=i;
+        const browser_dom *dom=d->dom;
+        CHECK(li>0&&!strcmp(dom->nodes[dom->nodes[li].parent].tag,"ul")&&!strcmp(dom_attr(&dom->nodes[dom->nodes[dom->nodes[li].parent].parent],"id"),"main"));
+        browser_parts_links(d);
+        CHECK(browser_document_render(d,err,sizeof(err))==0);
+        CHECK(browser_style_at(d,(size_t)(strstr(d->text,"item")-d->text)).color==0xff0000ff);
+        char back[64];snprintf(back,sizeof(back),"Back to part %d of this page",part);
+        CHECK(strstr(d->text,back)&&strstr(d->text,back)<strstr(d->text,"item"));      /* at the top */
+        ended=strstr(d->text,"The end.")!=NULL;
+        browser_parts_free(parts);parts=browser_parts_copy(d->parts);part++;
+        drop(d);
+    }
+    CHECK(ended&&expected==30000&&part==parts->count&&part>=3);
+    browser_parts_free(parts);
+    /* the page read in memory, in one go: cut short, without parts */
+    d=parse(html);CHECK(d->shortened&&!d->parts&&strstr(d->text,"shortened"));drop(d);
+    free(html);
+}
+int main(void){modern();mutation();fetching();modules();limits();styling();streaming();spans();layout();scripts_fit();dom_size();media();selectors();compacting();implied();script_dom();browser_side();long_pages();printf("engine: %d checks, %d failures\n",checks,failures);return failures?1:0;}

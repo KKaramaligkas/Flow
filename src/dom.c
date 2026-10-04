@@ -35,6 +35,7 @@ int dom_add(browser_dom *dom, int parent, const char *tag, const char *text)
     memset(n, 0, sizeof(*n)); n->parent = parent; n->first = n->last = n->next = -1;
     strcpy(n->tag, tag); n->source_id=i;
     if (text && !(n->text = copy(dom, text))) return -1;
+    if (text && !strcmp(tag, "#text")) dom->text_bytes += strlen(text);
     dom->count++;
     if (parent >= 0) {
         if (dom->nodes[parent].last >= 0) dom->nodes[dom->nodes[parent].last].next = i;
@@ -94,6 +95,14 @@ static int get(reader *r)
     return c;
 }
 static int peek(reader *r) { if(r->look==-2)r->look=get(r);return r->look; }
+/* The source offset of the next byte get() returns. */
+static size_t position(const reader *r) { return r->look>=0?r->bytes-1:r->bytes; }
+/* The part read stops before the token at `offset`: the next part starts there. */
+static void cut(browser_dom *dom,const int *stack,int depth,size_t offset)
+{
+    dom->cut=offset;dom->shortened=0;
+    memcpy(dom->cut_stack,stack,(size_t)depth*sizeof(*stack));dom->cut_depth=depth;
+}
 static int whitespace(int c) { return c >= 0 && isspace((unsigned char)c); }
 static int empty_tag(const char *tag)
 {
@@ -230,14 +239,22 @@ int dom_parse(browser_dom *dom, dom_read_fn read, void *ud, int html, int latin,
     reader r={.read=read,.ud=ud,.cancel=cancel,.cancel_ud=cancel_ud,.look=-2};
     int stack[DOM_DEPTH_MAX]={0},depth=1,c;
     char token[DOM_TOKEN_MAX+1];
-    while((c=get(&r))>=0 && !dom->shortened) {
+    for(;;) {
+        /* a long page is read in parts: this one ends before the next token
+           (also when an attribute or a style no longer fit) */
+        if(dom->shortened||dom->count>=DOM_PART_NODES||dom->text_bytes>=DOM_PART_TEXT||dom->bytes>=DOM_BYTES_MAX-DOM_PART_MARGIN) {
+            if(peek(&r)>=0)cut(dom,stack,depth,position(&r));
+            break;
+        }
+        if((c=get(&r))<0)break;
+        size_t start=r.bytes-1;
         if(!html||c!='<') {
             size_t n=0;token[n++]=(char)c;
             while(n<DOM_TOKEN_MAX-64&&(c=peek(&r))>=0&&(!html||c!='<'))token[n++]=(char)get(&r);
             /* Continue a UTF-8 sequence/entity through a buffer boundary. */
             while(n<DOM_TOKEN_MAX&&(c=peek(&r))>=0&&(((unsigned)c&0xc0)==0x80 || (pending_entity(token,n)&&c!='<'&&!whitespace(c))))token[n++]=(char)get(&r);
             token[n]=0;char *text=browser_decode(token,n,html,latin);
-            if(!text||dom_add(dom,stack[depth-1],"#text",text)<0){free(text);dom->shortened=1;break;}
+            if(!text||dom_add(dom,stack[depth-1],"#text",text)<0){free(text);cut(dom,stack,depth,start);break;}
             free(text);continue;
         }
         if(peek(&r)=='!') {
@@ -272,7 +289,7 @@ int dom_parse(browser_dom *dom, dom_read_fn read, void *ud, int html, int latin,
         if(eq(tag,"body"))for(int j=depth-1;j>0;j--)if(eq(dom->nodes[stack[j]].tag,"head")){depth=j;break;}
         if(html)depth=implied_end(dom,stack,depth,tag);
         int index=dom_add(dom,stack[depth-1],tag,NULL);
-        if(index<0){dom->shortened=1;break;}
+        if(index<0){cut(dom,stack,depth,start);break;}
         if(!oversized)attributes(dom,index,p);
         if(eq(tag,"script")||eq(tag,"style")) {
             int cut=0;char *text=raw(&r,tag,eq(tag,"script")?512*1024:256*1024,&cut);
@@ -293,7 +310,7 @@ int dom_parse(browser_dom *dom, dom_read_fn read, void *ud, int html, int latin,
         }
     }
     dom->source_bytes=r.bytes;
-    if(r.failed){snprintf(err,errlen,"%s",r.failed==2?"Cancelled":r.failed==3?"Page exceeds 8 MB.":r.failed==4?"Binary content. Select Download to save it.":"Could not read the page.");dom_free(dom);return -1;}
+    if(r.failed){snprintf(err,errlen,"%s",r.failed==2?"Cancelled":r.failed==3?"Page exceeds 64 MB.":r.failed==4?"Binary content. Select Download to save it.":"Could not read the page.");dom_free(dom);return -1;}
     return 0;
 }
 

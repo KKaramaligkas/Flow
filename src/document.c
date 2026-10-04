@@ -244,7 +244,8 @@ int browser_document_render(browser_document *doc,char *err,size_t errlen)
     if(!text||!spans){free(text);free(spans);snprintf(err,errlen,"Not enough memory to display the page.");return -1;}
     free(doc->text);free(doc->spans);css_free(&doc->css);doc->text=text;doc->spans=spans;
     doc->count=doc->anchor_count=doc->span_count=doc->links_omitted=doc->css_omitted=0;
-    int previously_shortened=doc->dom->shortened;doc->shortened=0;
+    /* a page cut short, unless it's shown in parts */
+    int previously_shortened=doc->dom->shortened||(doc->dom->cut&&!doc->parts);doc->shortened=0;
     doc->paper=0xff1f140c;snprintf(doc->title,sizeof(doc->title),"Web page");
     char base[BROWSER_URL_MAX];strcpy(base,doc->url);int base_set=0;
     for(int i=0;i<doc->dom->count;i++){
@@ -283,6 +284,176 @@ int browser_meta_refresh(const browser_document *doc,int seconds,char *url,size_
     }
     return 0;
 }
+/* ---- pages in parts ---- */
+
+void browser_part_reader_init(browser_part_reader *r,const browser_parts *parts,int part,browser_read_at_fn read_at,void *ud)
+{
+    memset(r,0,sizeof(*r));r->parts=parts;r->part=part;r->read_at=read_at;r->ud=ud;
+}
+/* What a part's reader gives before the part: the page's head, and the
+   elements open where it starts. */
+static const char *prefix_of(const browser_part_reader *r,int which)
+{
+    const char *text=!r->part?NULL:which?r->parts->part[r->part].context:r->parts->head;
+    return text?text:"";
+}
+size_t browser_part_prefix(const browser_part_reader *r)
+{
+    return strlen(prefix_of(r,0))+strlen(prefix_of(r,1));
+}
+int browser_part_read(void *ud,char *out,size_t size)
+{
+    browser_part_reader *r=ud;
+    size_t at=r->position,n=size;int got;
+    for(int which=0;which<2;which++){
+        const char *text=prefix_of(r,which);size_t length=strlen(text);
+        if(at<length){
+            if(n>length-at)n=length-at;
+            memcpy(out,text+at,n);r->position+=n;return (int)n;
+        }
+        at-=length;
+    }
+    got=r->read_at(r->ud,r->parts->part[r->part].offset+at,out,n);
+    if(got>0)r->position+=(size_t)got;
+    return got;
+}
+/* A growing string. */
+typedef struct { char *text; size_t used, size; int failed; } builder;
+static void put(builder *b,const char *s,size_t n)
+{
+    if(b->failed)return;
+    if(b->used+n+1>b->size){
+        size_t size=b->size?b->size:1024;while(size<b->used+n+1)size*=2;
+        char *p=realloc(b->text,size);if(!p){b->failed=1;return;}
+        b->text=p;b->size=size;
+    }
+    memcpy(b->text+b->used,s,n);b->used+=n;b->text[b->used]=0;
+}
+static void put_escaped(builder *b,const char *s,int quotes)
+{
+    for(const char *run=s;;s++){
+        if(*s&&*s!='&'&&*s!='<'&&!(quotes&&*s=='"'))continue;
+        put(b,run,(size_t)(s-run));
+        if(!*s)break;
+        put(b,*s=='&'?"&amp;":*s=='<'?"&lt;":"&quot;",*s=='&'?5:*s=='<'?4:6);
+        run=s+1;
+    }
+}
+/* A start tag with the element's attributes, long ones left out. */
+static void put_tag(builder *b,const dom_node *n)
+{
+    put(b,"<",1);put(b,n->tag,strlen(n->tag));
+    for(int a=0;a<n->attribute_count;a++){
+        const dom_attribute *at=&n->attributes[a];
+        if(strlen(at->value)>512||!strcmp(at->name,"data-flow-click"))continue;
+        put(b," ",1);put(b,at->name,strlen(at->name));put(b,"=\"",2);put_escaped(b,at->value,1);put(b,"\"",1);
+    }
+    put(b,">",1);
+}
+/* The page's title, base address and styles, as a head for its later parts. */
+static char *head_of(const browser_dom *dom)
+{
+    builder b={0};int title=0,base=0;
+    put(&b,"<html><head>",12);
+    for(int i=0;i<dom->count&&b.used<512*1024;i++){
+        const dom_node *n=&dom->nodes[i];
+        if(inside(dom,i,"noscript"))continue;
+        if(equal(n->tag,"title")&&!title++){
+            put(&b,"<title>",7);
+            for(int c=n->first;c>=0;c=dom->nodes[c].next)if(dom->nodes[c].text)put_escaped(&b,dom->nodes[c].text,0);
+            put(&b,"</title>",8);
+        } else if((equal(n->tag,"base")&&!base++)||(equal(n->tag,"link")&&stylesheet(n))) put_tag(&b,n);
+        else if(equal(n->tag,"style")&&n->text&&strlen(n->text)<512*1024-b.used){put_tag(&b,n);put(&b,n->text,strlen(n->text));put(&b,"</style>",8);}
+    }
+    put(&b,"</head>",7);
+    if(b.failed){free(b.text);return NULL;}
+    return b.text;
+}
+/* The start tags of the elements open where a part stopped, for the next:
+   its <body> and what's inside, with their attributes. */
+static char *open_tags(const browser_dom *dom)
+{
+    builder b={0};
+    put(&b,"",0);
+    for(int k=0;k<dom->cut_depth&&b.used<16*1024;k++){
+        const dom_node *n=&dom->nodes[dom->cut_stack[k]];
+        if(n->tag[0]=='#'||equal(n->tag,"html")||equal(n->tag,"head"))continue;
+        put_tag(&b,n);
+    }
+    if(b.failed||!b.text){free(b.text);return NULL;}
+    return b.text;
+}
+browser_parts *browser_parts_copy(const browser_parts *p)
+{
+    browser_parts *c=malloc(sizeof(*c));
+    if(!c)return NULL;
+    *c=*p;c->head=NULL;
+    for(int i=0;i<c->count;i++)c->part[i].context=NULL;
+    if(p->head&&!(c->head=strdup(p->head))){browser_parts_free(c);return NULL;}
+    for(int i=0;i<c->count;i++)if(p->part[i].context&&!(c->part[i].context=strdup(p->part[i].context))){browser_parts_free(c);return NULL;}
+    return c;
+}
+void browser_parts_free(browser_parts *p)
+{
+    if(!p)return;
+    for(int i=0;i<p->count;i++)free(p->part[i].context);
+    free(p->head);free(p);
+}
+int browser_parts_note(browser_document *doc,const browser_parts *known,int part,size_t prefix)
+{
+    const browser_dom *dom=doc->dom;
+    if(!known&&!dom->cut)return 0;
+    browser_parts *p=known?browser_parts_copy(known):calloc(1,sizeof(*p));
+    if(!p)return -1;
+    if(!known){p->count=1;if(!(p->head=head_of(dom))){free(p);return -1;}}
+    /* where the next part starts, unless it's known, or this part couldn't
+       go further than the head and open tags it starts with */
+    if(dom->cut>prefix&&part+1==p->count&&p->count<BROWSER_PARTS_MAX){
+        char *context=open_tags(dom);
+        if(!context){browser_parts_free(p);return -1;}
+        p->part[p->count].offset=p->part[part].offset+(dom->cut-prefix);
+        p->part[p->count++].context=context;
+    }
+    browser_parts_free(doc->parts);doc->parts=p;doc->part=part;
+    return 0;
+}
+/* An element added for the browser: no node of the page's scripts. */
+static int add(browser_dom *dom,int parent,const char *tag,const char *text)
+{
+    int i=dom_add(dom,parent,tag,text);
+    if(i>=0)dom->nodes[i].source_id=-1;
+    return i;
+}
+/* A paragraph with a link to part `number` (from 1), at the end of `parent` or its start. */
+static void part_link(browser_document *doc,int parent,int number,const char *label,int first)
+{
+    browser_dom *dom=doc->dom;
+    char url[BROWSER_URL_MAX+32];
+    snprintf(url,sizeof(url),"%.*s#flow-part-%d",(int)strcspn(doc->url,"#"),doc->url,number);
+    int p=add(dom,parent,"p",NULL),a=p>=0?add(dom,p,"a",NULL):-1;
+    if(a<0||add(dom,a,"#text",label)<0)return;
+    dom_set_attr(dom,p,"style","text-align:center;font-weight:bold;margin:12px 0");
+    dom_set_attr(dom,a,"href",url);
+    dom_node *up=&dom->nodes[parent];
+    if(first&&up->first!=p){
+        int before=up->first;
+        while(dom->nodes[before].next!=p)before=dom->nodes[before].next;
+        dom->nodes[before].next=-1;up->last=before;
+        dom->nodes[p].next=up->first;up->first=p;
+    }
+}
+void browser_parts_links(browser_document *doc)
+{
+    const browser_parts *p=doc->parts;
+    if(!p||!doc->dom)return;
+    int body=0;
+    for(int i=0;i<doc->dom->count;i++)if(equal(doc->dom->nodes[i].tag,"body")){body=i;break;}
+    if(!body)for(int i=0;i<doc->dom->count;i++)if(equal(doc->dom->nodes[i].tag,"html")){body=i;break;}
+    char label[96];
+    if(doc->part+1<p->count){snprintf(label,sizeof(label),"Continue reading: part %d of this page",doc->part+2);part_link(doc,body,doc->part+2,label,0);}
+    if(doc->part>0){snprintf(label,sizeof(label),"Back to part %d of this page",doc->part);part_link(doc,body,doc->part,label,1);}
+    doc->rendered=NULL;     /* the text shows them too */
+}
 browser_style browser_style_at(const browser_document *doc,size_t offset)
 {
     browser_style style={.color=0xfff2e8e0,.link=0xffe6bc52,.scale=0.64f};
@@ -295,7 +466,7 @@ void browser_document_free(browser_document *doc)
 {
     if(doc->view){browser_view_free(doc->view);free(doc->view);}
     picture_table_free(doc->pictures);
-    browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);free(doc->redirect.post);
+    browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);free(doc->redirect.post);browser_parts_free(doc->parts);
     if(doc->dom){dom_free(doc->dom);free(doc->dom);}memset(doc,0,sizeof(*doc));
 }
 int browser_document_read(browser_document *doc,dom_read_fn read,void *ud,const char *url,const char *type,

@@ -4,7 +4,14 @@
 #define DOM_NODES_MAX 16384     /* the node array grows to this as a page needs */
 #define DOM_BYTES_MAX (768 * 1024)
 #define DOM_DEPTH_MAX 64
-#define DOM_SOURCE_MAX (8 * 1024 * 1024)
+#define DOM_SOURCE_MAX (72 * 1024 * 1024)
+/* A page longer than memory allows is read in parts, each stopping before
+   it holds this many nodes, this much text, or nearly DOM_BYTES_MAX. */
+#ifndef DOM_PART_NODES
+#define DOM_PART_NODES 12000
+#endif
+#define DOM_PART_TEXT (400 * 1024)
+#define DOM_PART_MARGIN (32 * 1024)
 #define DOM_TOKEN_MAX 8192
 typedef struct { char *name, *value; } dom_attribute;
 typedef struct {
@@ -16,7 +23,11 @@ typedef struct {
 typedef struct {
     dom_node *nodes;
     int count, capacity, shortened, html;
-    size_t bytes, source_bytes, script_bytes;
+    size_t bytes, source_bytes, script_bytes, text_bytes;
+    /* A page that needs another part: the source offset where its next
+       token starts (0 when the page ended), and the elements open there. */
+    size_t cut;
+    int cut_stack[DOM_DEPTH_MAX], cut_depth;
 } browser_dom;
 typedef int (*dom_read_fn)(void *, char *, size_t);
 typedef int (*dom_cancel_fn)(void *);

@@ -264,17 +264,32 @@ unavailable.
 Pages are downloaded with HTTP compression into `.cache/page.tmp` on storage,
 then parsed in small chunks; the complete response is never buffered in RAM.
 The temporary file is deleted after use or transfer failure. A forced power-off
-may leave it behind; the next load replaces it. Decoded responses are capped at
-8 MB, reader text at 256 KB, links at 256, anchors at 128 and DOM nodes at 16,384.
-DOM text/attributes are bounded at 768 KB and nesting at 64. Oversized script
-blocks are skipped while parsing continues to later readable content. The page
-view holds up to 16,384 laid-out pieces with 512 KB of text, 1,024 links, 256
-form fields and 32 forms; longer pages are cut off with a notice.
+may leave it behind; the next load replaces it. Pages of up to 64 MB are
+downloaded (a longer one keeps its first 64 MB). Reader text is capped at
+256 KB, links at 256, anchors at 128, DOM text/attributes at 768 KB and nesting
+at 64. Oversized script blocks are skipped while parsing continues to later
+readable content. The page view holds up to 16,384 laid-out pieces with 512 KB
+of text, 1,024 links, 256 form fields and 32 forms; longer pages are cut off
+with a notice.
+
+### Long pages
+
+A page with more than fits in memory at once (12,000 elements and text runs,
+or 400 KB of text) is shown in parts. Its copy stays on the memory stick, in
+`.cache/`, while it's shown, and each part ends with a link to the next one:
+"Continue reading: part 2 of this page". Pressing Down or Right at the end of
+a part goes on to the next one too, and each part after the first starts with
+a link back. A part is read from the copy, not downloaded again, keeping the
+page's title and styles and the elements its text sits in. Only the first
+part runs the page's scripts. Back leaves the page, and Reload loads it again
+from the start. The copy is deleted when you leave the page.
 
 Stylesheets are downloaded up to 2 MB each (4 MB in all) and reduced at once
-to the rules that can match the page, which keeps up to 4,096 rules in 384 KB;
+to the rules that can match the page, or the classes and ids its scripts name
+(which they may give elements later), which keeps up to 4,096 rules in 384 KB;
 SVG drawings and `<template>` contents aren't kept either. Scripts are
-limited to 512 KB each / 1 MB source total; asset requests are capped at 16.
+limited to 512 KB each / 1 MB source total, and fetched before the
+stylesheets; at most 10 scripts and 12 stylesheets are requested.
 JavaScript gets an accounting heap limit of 8 MB, a 64 KB stack limit, at most
 2,048 pending jobs per drain, and a 30-second execution budget per page. Pages
 of more than 6,000 DOM nodes are shown without running their scripts, which
@@ -283,7 +298,8 @@ Network waiting does not consume that execution budget. Fetch/module requests sh
 8 requests / 512 KB total, with at most 256 KB per response. These limits keep
 a slow or malformed page from consuming all console memory. Notices identify
 shortened text, omitted assets and script failures. Downloads can save larger
-files. JavaScript always runs in the cancellable worker.
+files. JavaScript always runs in the cancellable worker; scripts kept to handle
+clicks after a page has loaded run there too, one click at a time.
 
 ## HTTPS and Wi-Fi
 

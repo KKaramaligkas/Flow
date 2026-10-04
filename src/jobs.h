@@ -9,6 +9,9 @@
    NAV_SCRIPT), with nothing (`unchanged`), or, when they sent the browser
    to another page, as a BROWSER_JOB_PAGE loading that. */
 #define BROWSER_JOB_CLICK 3
+/* Part `node` (from 0) of the page shown, a page in parts (doc->parts),
+   read from its copy: `page` when it's done. */
+#define BROWSER_JOB_PART 4
 
 typedef struct {
     volatile int running, finished, cancel, result;
@@ -35,6 +38,8 @@ int browser_jobs_submit(int type, int navigation, const char *url, const char *d
    scripts handle it; `values`: browser_view_values() or NULL. The shown
    page's scripts are the worker's until the job has finished. */
 int browser_jobs_click(browser_document *doc, int node, const char *values, int javascript);
+/* Part `part` of `doc`, the page shown, from its copy on the memory stick. */
+int browser_jobs_part(browser_document *doc, int part, int javascript);
 /* PSP-2000 and later: twice the memory. */
 int browser_jobs_roomy(void);
 

@@ -36,6 +36,7 @@ static unsigned last_layout, layout_cost;
 static int near_learned;        /* a size came for a picture near the screen since the last layout */
 static volatile int relayout_wanted;
 static int roomy;
+static unsigned spools;         /* copies of long pages made, for their names */
 static int progress(void *ud, int64_t done, int64_t total)
 {
     (void)ud; browser_work.done=done; browser_work.total=total;
@@ -228,6 +229,79 @@ void browser_pictures_forget(void)
 
 /* ---- pages ---- */
 
+/* A page not shown after all, and its copy if it had one. */
+static void discard(browser_document *doc)
+{
+    if(doc->parts) fs_remove(doc->parts->spool);
+    browser_document_free(doc); free(doc);
+}
+
+/* A page too long for memory: its copy is kept, for the parts after the
+   first, and the page notes where the next starts. */
+static void keep_parts(browser_document *doc,const char *type)
+{
+    char spool[256];
+    const char *slash=strrchr(page_cache,'/');
+    int dir=slash?(int)(slash-page_cache)+1:0;
+    snprintf(spool,sizeof(spool),"%.*slong%u.tmp",dir,page_cache,++spools);
+    fs_remove(spool);
+    if(browser_parts_note(doc,NULL,0,0)<0||!doc->parts||fs_rename(page_cache,spool)<0) {
+        browser_parts_free(doc->parts); doc->parts=NULL;
+        return;
+    }
+    pm_strlcpy(doc->parts->spool,spool,sizeof(doc->parts->spool));
+    pm_strlcpy(doc->parts->type,type,sizeof(doc->parts->type));
+}
+typedef struct { fs_file f; size_t at; } spool_file;
+static int read_spool(void *ud,size_t offset,char *out,size_t size)
+{
+    spool_file *s=ud;
+    if(offset!=s->at&&fs_seek(s->f,(int64_t)offset,0)!=(int64_t)offset) return -1;
+    int n=fs_read(s->f,out,(int)size);
+    s->at=offset+(n>0?(size_t)n:0);
+    return n;
+}
+/* Part browser_work.node of the page shown, read from its copy. */
+static void part_job(void)
+{
+    const browser_document *shown=browser_work.target;
+    const browser_parts *known=shown->parts;
+    int part=browser_work.node;
+    if(!known||part<0||part>=known->count) { snprintf(browser_work.error,sizeof(browser_work.error),"That part of the page isn't known yet."); return; }
+    spool_file spool={fs_open(known->spool,FS_READ),0};
+    if(spool.f<0) { snprintf(browser_work.error,sizeof(browser_work.error),"This page's copy is gone. Reload the page."); return; }
+#ifdef PM_AUTOTEST
+    phase_start=sceKernelGetSystemTimeLow();
+#endif
+    browser_part_reader reader;
+    browser_part_reader_init(&reader,known,part,read_spool,&spool);
+    browser_document *doc=calloc(1,sizeof(*doc));
+    if(!doc) snprintf(browser_work.error,sizeof(browser_work.error),"Not enough memory to open the page.");
+    else if(browser_document_load(doc,browser_part_read,&reader,shown->url,known->type,cancelled,NULL,browser_work.error,sizeof(browser_work.error))<0) { free(doc); doc=NULL; }
+    fs_close(spool.f);
+    phase("parse");
+    if(!doc) return;
+    if(browser_parts_note(doc,known,part,browser_part_prefix(&reader))<0) {
+        snprintf(browser_work.error,sizeof(browser_work.error),"Not enough memory to open the page.");
+        browser_document_free(doc); free(doc); return;
+    }
+    doc->source_bytes=shown->source_bytes;
+    /* the first part runs its scripts, as when the page loaded; the others are shown without */
+    doc->scripting=!part&&browser_work.javascript&&browser_scripts_present(doc);
+    browser_assets(doc,doc->scripting,fetch_asset,NULL,cancelled,NULL);
+    phase("assets");
+    if(doc->scripting) {
+        browser_script_run(doc,fetch_same_origin,doc,cancelled,NULL,30000,browser_work.error,sizeof(browser_work.error));
+        if(!doc->scripts_run) doc->scripting=0;
+        doc->redirect.url[0]=0;
+    }
+    browser_parts_links(doc);
+    if(doc->rendered!=doc->dom&&browser_document_render(doc,browser_work.error,sizeof(browser_work.error))<0) { browser_document_free(doc); free(doc); return; }
+    phase("render");
+    if(!cancelled(NULL)) browser_build_view(doc);
+    phase("view");
+    browser_work.page=doc; browser_work.result=0;
+}
 /* Whether `target` is `page` itself, or with `fragment_only` a part of it
    (an address with a #fragment): nothing to load. */
 static int same_page(const char *page,const char *target,int fragment_only)
@@ -259,6 +333,7 @@ static browser_document *load_page(const char *url,const char *post)
         }
         if(f>=0)fs_close(f);
         phase("parse");
+        if(doc&&doc->dom->cut) keep_parts(doc,response.content_type);
         if(doc) {
             doc->source_bytes=(size_t)length;
             doc->scripting=browser_work.javascript&&browser_scripts_present(doc);
@@ -270,8 +345,9 @@ static browser_document *load_page(const char *url,const char *post)
                 if(!doc->scripts_run) doc->scripting=0;     /* none could run: as without JavaScript */
             }
             phase("scripts");
+            browser_parts_links(doc);
             if(doc->rendered!=doc->dom&&browser_document_render(doc,browser_work.error,sizeof(browser_work.error))<0) {
-                browser_document_free(doc); free(doc); doc=NULL;
+                discard(doc); doc=NULL;
             } else {
                 phase("render");
                 /* where it sends the browser on to: not to a #fragment of
@@ -304,7 +380,7 @@ static void page_job(void)
         if(hop==REDIRECTS_MAX) { r->url[0]=0; free(r->post); r->post=NULL; browser_build_view(doc); break; }
         pm_strlcpy(url,r->url,sizeof(url)); pm_strlcpy(browser_work.url,url,sizeof(browser_work.url));
         post=r->post; r->post=NULL;
-        browser_document_free(doc); free(doc); doc=NULL;
+        discard(doc); doc=NULL;
     }
     free(post);
     if(doc) { browser_work.page=doc; browser_work.result=0; }
@@ -339,6 +415,7 @@ static void click_job(void)
     next->scripts_run=doc->scripts_run; next->assets_omitted=doc->assets_omitted;
     for(int i=0;i<doc->hidden_count;i++) next->hidden[i]=doc->hidden[i];
     next->hidden_count=doc->hidden_count;
+    if(doc->parts&&(next->parts=browser_parts_copy(doc->parts))) { next->part=doc->part; browser_parts_links(next); }
     if(browser_document_render(next,browser_work.error,sizeof(browser_work.error))<0) { browser_document_free(next); free(next); return; }
     picture_table_rebind(doc->pictures,doc->dom,next->dom);
     next->pictures=doc->pictures;
@@ -362,6 +439,7 @@ static int worker(SceSize args, void *argp)
             browser_work.result=net_download(browser_work.url,browser_work.destination,progress,NULL,
                                             browser_work.error,sizeof(browser_work.error));
         } else if(browser_work.type==BROWSER_JOB_CLICK) click_job();
+        else if(browser_work.type==BROWSER_JOB_PART) part_job();
         else page_job();
         if(browser_work.cancel || quit) browser_work.result=-1;
         free(browser_work.post); browser_work.post=NULL;
@@ -399,6 +477,15 @@ void browser_jobs_stop(void)
 }
 int browser_jobs_busy(void) { return browser_work.running || browser_work.finished; }
 int browser_jobs_roomy(void) { return roomy; }
+int browser_jobs_part(browser_document *doc,int part,int javascript)
+{
+    if(browser_jobs_busy() || thread<0 || !doc || !doc->parts || part<0 || part>=doc->parts->count) return -1;
+    memset(&browser_work,0,sizeof(browser_work));
+    browser_work.type=BROWSER_JOB_PART; browser_work.navigation=NAV_SCRIPT; browser_work.total=-1;
+    browser_work.javascript=javascript; browser_work.target=doc; browser_work.node=part;
+    pm_strlcpy(browser_work.url,doc->url,sizeof(browser_work.url));
+    browser_work.running=1; sceKernelSignalSema(wake,1); return 0;
+}
 int browser_jobs_submit(int type, int navigation, const char *url, const char *destination,int javascript,const char *post)
 {
     if(browser_jobs_busy() || thread<0 || strlen(url)>=sizeof(browser_work.url) ||
