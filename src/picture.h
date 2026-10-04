@@ -77,6 +77,9 @@ void picture_table_free(picture_table *);
 int picture_add(picture_table *, int node, const char *url, int want_w, int want_h, int sized, int top, float density);
 /* The node's entry, -1 when it has none. */
 int picture_of(const picture_table *, int node);
+/* Scripts changed the page from `old` to `dom` (nodes keyed by source_id):
+   an <img> whose source changed is looked up again by its new address. */
+void picture_table_rebind(picture_table *, const browser_dom *old, const browser_dom *dom);
 /* The size the node's picture shows at on its own, in page pixels, once
    known: 1, else 0. */
 int picture_known(const picture_table *, int node, int *w, int *h);

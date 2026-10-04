@@ -53,6 +53,7 @@ typedef struct {
     int *y;                     /* the y of the open line's block */
     int collapse;               /* bottom margin already added below the last block */
     int link, label;            /* the link and field that clicks go to */
+    int consent;                /* the cookie consent notice laid out (its source_id), -1 outside one */
     int pad;                    /* vertical padding of the inline background */
     int list_kind, *list_number, marker, marker_number;
     float marker_scale;
@@ -635,7 +636,7 @@ static int has_picture(builder *b, int node, int depth)
     if (!t) return 0;
     for (int c = b->dom->nodes[node].first; c >= 0 && depth < 8; c = b->dom->nodes[c].next) {
         const dom_node *k = &b->dom->nodes[c];
-        int i = is(k, "img") ? picture_of(t, c) : -1;
+        int i = is(k, "img") ? picture_of(t, k->source_id) : -1;
         if (i >= 0 && t->entries[i].state == PICTURE_READY) return 1;
         if (k->tag[0] != '#' && has_picture(b, c, depth + 1)) return 1;
     }
@@ -666,6 +667,7 @@ static void register_forms(builder *b)
             f->post = eq(dom_attr(n, "method"), "post");
             f->multipart = eq(dom_attr(n, "enctype"), "multipart/form-data");
             f->fields = 0;
+            f->scripted = has_attr(n, "data-flow-click");
             form_of[i] = v->form_count++;
         }
         if (!(is(n, "input") || is(n, "select") || is(n, "textarea") || is(n, "button"))) continue;
@@ -675,6 +677,11 @@ static void register_forms(builder *b)
         c->kind = control_kind(n);
         c->form = form_of[i];
         c->item = -1;
+        c->node = n->source_id;
+        c->dismiss = -1;
+        /* A button's click, or a form's submission, the page's scripts handle */
+        c->scripted = has_attr(n, "data-flow-click") ||
+                      (c->form >= 0 && v->forms[c->form].scripted && (c->kind == CONTROL_SUBMIT || c->kind == CONTROL_IMAGE));
         c->name = store_string(b, dom_attr(n, "name"));
         c->disabled = has_attr(n, "disabled");
         c->readonly = has_attr(n, "readonly");
@@ -788,6 +795,7 @@ static void field(builder *b, int node, browser_style st, browser_box *box)
     float s = 0.6f;
     w = clampi(w, 11, l->width > 11 ? l->width : 11);
     view_control *c = &v->controls[index];
+    c->dismiss = b->consent;
     int plain = (c->kind == CONTROL_SUBMIT || c->kind == CONTROL_RESET || c->kind == CONTROL_BUTTON) &&
                 ((box->plain & 1) || ((box->plain & 2) && (box->plain & 4)));
     if (plain) {
@@ -817,8 +825,9 @@ static int image_picture(builder *b, int node, int *nw, int *nh)
     size_t n;
     float density;
     *nw = *nh = 0;
-    if (!t || (picture_of(t, node) < 0 && (t->count >= PICTURES_MAX || !picture_source(b->dom, node, VIEW_WIDTH, &n, &density)))) return 0;
-    picture_known(t, node, nw, nh);
+    int key = b->dom->nodes[node].source_id;
+    if (!t || (picture_of(t, key) < 0 && (t->count >= PICTURES_MAX || !picture_source(b->dom, node, VIEW_WIDTH, &n, &density)))) return 0;
+    picture_known(t, key, nw, nh);
     return 1;
 }
 
@@ -898,21 +907,22 @@ static char *picture_url(builder *b, int node, int width, float *density)
 static int add_picture(builder *b, int node, const browser_box *box, int w, int h)
 {
     picture_table *t = b->doc->pictures;
-    int nw, nh, given_w = box->width != 0, given_h = box->height > 0, known = picture_of(t, node);
+    int key = b->dom->nodes[node].source_id;
+    int nw, nh, given_w = box->width != 0, given_h = box->height > 0, known = picture_of(t, key);
     if (!t || (w <= 0 && (known >= 0 || given_w || given_h)) || !image_picture(b, node, &nw, &nh)) return -1;
     int fit = given_w && given_h ? PICTURE_FIT_STRETCH : given_w || given_h ? PICTURE_FIT_BOX : PICTURE_FIT_OWN;
     /* the size it's decoded at: its box, or for a picture shown at its own
        size, at most as wide as the line */
     int want_w = fit == PICTURE_FIT_OWN ? b->line->width : given_w ? w : 0, want_h = given_h ? h : 0;
     if (known >= 0) {
-        picture_add(t, node, t->entries[known].url, want_w, want_h, fit, *b->y, t->entries[known].density);
+        picture_add(t, key, t->entries[known].url, want_w, want_h, fit, *b->y, t->entries[known].density);
         if (b->naming) t->entries[known].relayout = 1;
         return known;
     }
     float density;
     char *url = picture_url(b, node, want_w > 0 ? want_w : b->line->width, &density);
     if (!url) return -1;
-    int index = picture_add(t, node, url, want_w, want_h, fit, *b->y, density);
+    int index = picture_add(t, key, url, want_w, want_h, fit, *b->y, density);
     free(url);
     /* an icon link shows its name until its picture arrives */
     if (index >= 0 && b->naming) t->entries[index].relayout = 1;
@@ -949,8 +959,11 @@ static void children(builder *b, int node, browser_style st)
 static int skipped(builder *b, const dom_node *n)
 {
     static const char *tags[] = {"head", "script", "style", "template", "title", "link", "meta", "base", "svg", "math",
-                                 "datalist", "param", "source", "track", "area", "map", "dialog"};
+                                 "datalist", "param", "source", "track", "area", "map"};
     for (size_t i = 0; i < sizeof(tags) / sizeof(*tags); i++) if (is(n, tags[i])) return 1;
+    if (is(n, "dialog") && !has_attr(n, "open")) return 1;
+    /* notices the user closed */
+    for (int i = 0, count = b->doc->hidden_count; i < count && i < BROWSER_HIDDEN_MAX; i++) if (b->doc->hidden[i] == n->source_id) return 1;
     /* With JavaScript on, <noscript> is skipped like in other browsers;
        its styles often hide the whole page. */
     return b->scripting && is(n, "noscript");
@@ -1153,8 +1166,96 @@ static void element(builder *b, int node, browser_style parent)
     element_styled(b, node, parent, st, box);
 }
 
+/* ---- cookie consent notices ---- */
+
+/* The names sites and consent tools give a notice asking for consent to
+   cookies: its id, a class, its label. */
+static int consent_name(const char *name, size_t length)
+{
+    static const char *tools[] = {"consent", "gdpr", "onetrust", "didomi", "qc-cmp", "truste", "usercentrics", "cookiebot",
+                                  "tarteaucitron", "iubenda", "cmplz", "borlabs", "cookieyes", "cc-window", "cc-banner",
+                                  "sp-message", "fc-consent", "cookielaw", "cookie-law"};
+    static const char *notices[] = {"banner", "bar", "notice", "notif", "popup", "pop-up", "modal", "message", "alert", "wall",
+                                    "layer", "overlay", "dialog", "warning", "policy", "law", "hint", "disclaimer", "prompt", "accept"};
+    char s[128];
+    if (length >= sizeof(s)) length = sizeof(s) - 1;
+    for (size_t i = 0; i < length; i++) s[i] = name[i] == '_' ? '-' : (char)tolower((unsigned char)name[i]);
+    s[length] = 0;
+    for (size_t i = 0; i < sizeof(tools) / sizeof(*tools); i++) if (strstr(s, tools[i])) return 1;
+    int cookie = strstr(s, "cookie") != NULL, privacy = strstr(s, "privacy") != NULL;
+    if (cookie || privacy)
+        for (size_t i = 0; i < sizeof(notices) / sizeof(*notices); i++)
+            if (strstr(s, notices[i]) && (cookie || (strcmp(notices[i], "policy") && strcmp(notices[i], "law")))) return 1;
+    return 0;
+}
+/* Whether the text of an element (its first few hundred nodes) speaks of
+   cookies or consent: in most languages, the word "cookie" itself. */
+static int mentions_cookies(const browser_dom *dom, int node)
+{
+    int stack[64], top = 0, seen = 0;
+    stack[top++] = node;
+    while (top && seen++ < 300) {
+        const dom_node *n = &dom->nodes[stack[--top]];
+        if (n->text && !strcmp(n->tag, "#text"))
+            for (const char *p = n->text; *p; p++)
+                if (!strncasecmp(p, "cookie", 6) || !strncasecmp(p, "consent", 7)) return 1;
+        for (int c = n->first; c >= 0 && top < 64; c = dom->nodes[c].next) stack[top++] = c;
+    }
+    return 0;
+}
+/* A notice asking for consent to cookies: named so, or a dialog about them. */
+static int consent_box(const browser_dom *dom, int node)
+{
+    const dom_node *n = &dom->nodes[node];
+    if (n->tag[0] == '#' || is(n, "html") || is(n, "body") || is(n, "main")) return 0;
+    const char *id = dom_attr(n, "id"), *label = dom_attr(n, "aria-label"), *role = dom_attr(n, "role");
+    if ((*id && consent_name(id, strlen(id))) || (*label && consent_name(label, strlen(label)))) return 1;
+    for (const char *c = dom_attr(n, "class"); *c;) {
+        while (isspace((unsigned char)*c)) c++;
+        const char *end = c;
+        while (*end && !isspace((unsigned char)*end)) end++;
+        if (end > c && consent_name(c, (size_t)(end - c))) return 1;
+        c = end;
+    }
+    if (is(n, "dialog") || eq(role, "dialog") || eq(role, "alertdialog") || eq(dom_attr(n, "aria-modal"), "true"))
+        return mentions_cookies(dom, node);
+    return 0;
+}
+/* Whether an element of a notice looks like one of its buttons. */
+static int button_like(const dom_node *n)
+{
+    const char *role = dom_attr(n, "role"), *cls = dom_attr(n, "class");
+    if (is(n, "a") || eq(role, "button") || eq(role, "link") || eq(role, "menuitem") || eq(role, "switch") ||
+        has_attr(n, "tabindex") || has_attr(n, "onclick")) return 1;
+    for (const char *p = cls; *p; p++)
+        if (!strncasecmp(p, "btn", 3) || !strncasecmp(p, "button", 6)) return 1;
+    return 0;
+}
+enum { CLICK_LINK = 1, CLICK_SCRIPT = 2, CLICK_DISMISS = 4 };
+/* What a click on an element does: follow its link, run the page's scripts
+   (data-flow-click), or close the consent notice it's a button of when
+   nothing else happens. */
+static int clickable(builder *b, int node)
+{
+    const dom_node *n = &b->dom->nodes[node];
+    const char *href = dom_attr(n, "href");
+    int what = 0;
+    if (is(n, "a") && *href && !(b->consent >= 0 && (*href == '#' || !strncasecmp(href, "javascript:", 11)))) what |= CLICK_LINK;
+    if (has_attr(n, "data-flow-click") && !is(n, "form") && !is(n, "body") && !is(n, "html")) what |= CLICK_SCRIPT;
+    if (b->consent >= 0 && !(what & CLICK_LINK) && button_like(n)) what |= CLICK_DISMISS;
+    return what;
+}
+
+static void element_box(builder *b, int node, browser_style parent, browser_style st, browser_box box);
 /* An element whose style the caller computed. */
 static void element_styled(builder *b, int node, browser_style parent, browser_style st, browser_box box)
+{
+    int consent = b->consent;
+    if (consent < 0 && consent_box(b->dom, node)) b->consent = b->dom->nodes[node].source_id;
+    element_box(b, node, parent, st, box);
+    b->consent = consent;
+}
+static void element_box(builder *b, int node, browser_style parent, browser_style st, browser_box box)
 {
     const browser_dom *dom = b->dom;
     const dom_node *n = &dom->nodes[node];
@@ -1184,14 +1285,18 @@ static void element_styled(builder *b, int node, browser_style parent, browser_s
         add_text(b, text, label);
         return;
     }
-    int link = b->link, label = b->label;
+    int link = b->link, label = b->label, what = clickable(b, node);
     char icon[96] = "";
-    if (is(n, "a") && *dom_attr(n, "href") && b->v->link_count < VIEW_LINKS_MAX) {
-        char target[BROWSER_URL_MAX];
-        if (browser_url_resolve(b->base, dom_attr(n, "href"), target, sizeof(target)) == 0) {
-            int at = store_string(b, target);
-            if (at >= 0) { b->v->links[b->v->link_count].url = at; b->link = b->v->link_count++; }
+    if (what && b->v->link_count < VIEW_LINKS_MAX) {
+        view_link *l = &b->v->links[b->v->link_count];
+        l->url = -1;
+        l->node = what & CLICK_SCRIPT ? n->source_id : -1;
+        l->dismiss = b->consent;
+        if (what & CLICK_LINK) {
+            char target[BROWSER_URL_MAX];
+            if (browser_url_resolve(b->base, dom_attr(n, "href"), target, sizeof(target)) == 0) l->url = store_string(b, target);
         }
+        if (l->url >= 0 || l->node >= 0 || (what & CLICK_DISMISS)) b->link = b->v->link_count++;
         /* An icon link (a logo, GitHub, Menu) shows its name, unless its picture shows. */
         if (!has_content(dom, node, 0) && !has_picture(b, node, 0)) accessible_name(dom, node, icon, sizeof(icon));
     }
@@ -1243,8 +1348,7 @@ typedef struct { int node, column, span; } cell;
    element()), or -1 when the element isn't one. */
 static float icon_width(builder *b, int node, browser_style st)
 {
-    const dom_node *n = &b->dom->nodes[node];
-    if (!is(n, "a") || !*dom_attr(n, "href") || has_content(b->dom, node, 0) || has_picture(b, node, 0)) return -1;
+    if (!clickable(b, node) || has_content(b->dom, node, 0) || has_picture(b, node, 0)) return -1;
     char name[96] = "";
     accessible_name(b->dom, node, name, sizeof(name));
     browser_style ns = name_style(st);
@@ -2019,7 +2123,7 @@ int browser_view_build(browser_view *v, const browser_document *doc, int width, 
     v->paper = 0xffffffff;
     v->ink = 0xff000000;
     b->v = v; b->doc = doc; b->dom = doc->dom; b->measure = measure; b->control_of = control_of;
-    b->link = b->label = -1; b->scripting = doc->scripting;
+    b->link = b->label = b->consent = -1; b->scripting = doc->scripting;
     b->item_width = -1; b->last.node = -1;
     strcpy(b->base, doc->url);
     for (int i = 0; i < doc->dom->count; i++)
@@ -2202,6 +2306,47 @@ static int pair(char *out, size_t size, size_t *used, const char *name, const ch
     if (encode(out, size, used, name) < 0 || *used + 1 >= size) return -1;
     out[(*used)++] = '=';
     return encode(out, size, used, value);
+}
+
+/* Appends a JSON string to a buffer with room for it. */
+static size_t json_string(char *out, const char *s)
+{
+    size_t used = 0;
+    out[used++] = '"';
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { out[used++] = '\\'; out[used++] = (char)c; }
+        else if (c < 0x20) used += (size_t)sprintf(out + used, "\\u%04x", c);
+        else out[used++] = (char)c;
+    }
+    out[used++] = '"';
+    return used;
+}
+char *browser_view_values(const browser_view *v)
+{
+    size_t capacity = 0, used = 0;
+    char *out = NULL;
+    for (int i = 0; i < v->control_count; i++) {
+        const view_control *c = &v->controls[i];
+        int text = (c->kind == CONTROL_TEXT || c->kind == CONTROL_PASSWORD || c->kind == CONTROL_TEXTAREA) && strcmp(c->value, c->initial);
+        int checked = (c->kind == CONTROL_CHECKBOX || c->kind == CONTROL_RADIO) && c->checked != c->checked_initial;
+        int selected = c->kind == CONTROL_SELECT && c->selected != c->selected_initial;
+        if ((!text && !checked && !selected) || c->node < 0) continue;
+        size_t need = used + (text ? strlen(c->value) * 6 : 0) + 96;
+        if (need > capacity) {
+            capacity = need * 2;
+            char *grown = realloc(out, capacity);
+            if (!grown) { free(out); return NULL; }
+            out = grown;
+        }
+        used += (size_t)sprintf(out + used, "%s[%d,", used ? "," : "[", c->node);
+        if (text) used += json_string(out + used, c->value);
+        else used += (size_t)sprintf(out + used, "null");
+        used += (size_t)sprintf(out + used, checked ? (c->checked ? ",true," : ",false,") : ",null,");
+        used += (size_t)(selected ? sprintf(out + used, "%d]", c->selected) : sprintf(out + used, "null]"));
+    }
+    if (out) { out[used++] = ']'; out[used] = 0; }
+    return out;
 }
 
 int browser_view_submit(const browser_view *v, int form, int submitter, char *url, size_t url_size,

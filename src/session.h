@@ -5,6 +5,8 @@
 #define NAV_NEW 0
 #define NAV_BACK 1
 #define NAV_RELOAD 2
+#define NAV_REPLACE 3   /* takes the place of the page shown in history (location.replace()) */
+#define NAV_SCRIPT 4    /* the page shown, as its scripts changed it: history stays as it is */
 
 typedef struct { char url[BROWSER_URL_MAX]; int scroll; } browser_visit;
 typedef struct { browser_visit visits[BROWSER_HISTORY_MAX]; int count, current; } browser_history;

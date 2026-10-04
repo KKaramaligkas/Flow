@@ -262,6 +262,27 @@ int browser_document_render(browser_document *doc,char *err,size_t errlen)
     doc->rendered=doc->dom;
     return 0;
 }
+int browser_meta_refresh(const browser_document *doc,int seconds,char *url,size_t size)
+{
+    for(int i=0;doc->dom&&i<doc->dom->count;i++){
+        const dom_node *n=&doc->dom->nodes[i];
+        if(!equal(n->tag,"meta")||!equal(dom_attr(n,"http-equiv"),"refresh")||(doc->scripting&&inside(doc->dom,i,"noscript")))continue;
+        /* "5; url=https://...": a delay, then the address, perhaps quoted */
+        const char *p=dom_attr(n,"content");char *end;
+        while(isspace((unsigned char)*p))p++;
+        double delay=strtod(p,&end);
+        if(end==p||delay<0||delay>seconds)continue;
+        p=end;while(isspace((unsigned char)*p)||*p==';'||*p==',')p++;
+        if(starts(p,"url")){const char *q=p+3;while(isspace((unsigned char)*q))q++;if(*q=='='){p=q+1;while(isspace((unsigned char)*p))p++;}}
+        char quote=*p=='\''||*p=='"'?*p++:0,ref[BROWSER_URL_MAX];
+        size_t length=quote&&strchr(p,quote)?(size_t)(strchr(p,quote)-p):strlen(p);
+        while(length&&isspace((unsigned char)p[length-1]))length--;
+        if(!length||length>=sizeof(ref))continue;
+        memcpy(ref,p,length);ref[length]=0;
+        if(browser_url_resolve(doc->url,ref,url,size)==0)return 1;
+    }
+    return 0;
+}
 browser_style browser_style_at(const browser_document *doc,size_t offset)
 {
     browser_style style={.color=0xfff2e8e0,.link=0xffe6bc52,.scale=0.64f};
@@ -274,7 +295,7 @@ void browser_document_free(browser_document *doc)
 {
     if(doc->view){browser_view_free(doc->view);free(doc->view);}
     picture_table_free(doc->pictures);
-    browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);
+    browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);free(doc->redirect.post);
     if(doc->dom){dom_free(doc->dom);free(doc->dom);}memset(doc,0,sizeof(*doc));
 }
 int browser_document_read(browser_document *doc,dom_read_fn read,void *ud,const char *url,const char *type,
@@ -313,7 +334,7 @@ int browser_document_parse(browser_document *doc,const char *data,size_t length,
 }
 void browser_assets(browser_document *doc,int javascript,browser_asset_fn fetch,void *ud,dom_cancel_fn cancel,void *cancel_ud)
 {
-    int requests=0; size_t script_bytes=doc->dom->script_bytes, css_bytes=0;
+    int requests[2]={0,0}; size_t script_bytes=doc->dom->script_bytes, css_bytes=0;
     char base[BROWSER_URL_MAX]; strcpy(base,doc->url);
     for(int i=0;i<doc->dom->count;i++) if(!strcmp(doc->dom->nodes[i].tag,"base")) {
         char resolved[BROWSER_URL_MAX];
@@ -321,41 +342,47 @@ void browser_assets(browser_document *doc,int javascript,browser_asset_fn fetch,
         break;
     }
     size_t downloaded=0;
-    for(int i=0;i<doc->dom->count&&!(cancel&&cancel(cancel_ud));i++) {
-        dom_node *n=&doc->dom->nodes[i]; int script=!strcmp(n->tag,"script");
-        int css=!script&&stylesheet(n);
-        if(!script&&!css)continue;
-        if(css&&!strcmp(n->tag,"style")) {
-            /* Inline styles too keep only what can match. */
-            if(!n->text)continue;
-            size_t before=strlen(n->text)+1,length=0;
-            char *compact=css_compact(n->text,before-1,doc->dom,&length);
-            if(!compact)continue;
-            free(n->text);n->text=compact;
-            doc->dom->bytes=doc->dom->bytes-before+length+1;css_bytes+=length;
-            continue;
+    /* Scripts first: a stylesheet keeps the rules for the classes they
+       name, which they may give elements later. */
+    for(int pass=0;pass<2;pass++) {
+        css_features *features=pass?css_page_features(doc->dom):NULL;
+        for(int i=0;i<doc->dom->count&&!(cancel&&cancel(cancel_ud));i++) {
+            dom_node *n=&doc->dom->nodes[i]; int script=!strcmp(n->tag,"script");
+            int css=!script&&stylesheet(n);
+            if(pass?!css:!script)continue;
+            if(css&&!strcmp(n->tag,"style")) {
+                /* Inline styles too keep only what can match. */
+                if(!n->text)continue;
+                size_t before=strlen(n->text)+1,length=0;
+                char *compact=css_compact_for(n->text,before-1,features,&length);
+                if(!compact)continue;
+                free(n->text);n->text=compact;
+                doc->dom->bytes=doc->dom->bytes-before+length+1;css_bytes+=length;
+                continue;
+            }
+            const char *ref=dom_attr(n,script?"src":"href"); if(!*ref||(script&&!javascript))continue;
+            if(css&&javascript&&inside(doc->dom,i,"noscript"))continue;     /* not shown with JavaScript on */
+            char target[BROWSER_URL_MAX],final[BROWSER_URL_MAX]; int limit=script?512*1024:CSS_SHEET_MAX;
+            size_t left=script?1024*1024-script_bytes:css_bytes<CSS_TEXT_MAX&&downloaded<2*CSS_SHEET_MAX?2*CSS_SHEET_MAX-downloaded:0;
+            if(requests[pass]++>=(script?10:12)||!left||browser_url_resolve(base,ref,target,sizeof(target))<0||
+               (browser_url_secure(doc->url)&&!browser_url_secure(target))||(script&&!browser_same_origin(doc->url,target))) { doc->assets_omitted++; continue; }
+            if((size_t)limit>left)limit=(int)left;
+            int length=0; final[0]=0;
+            char *data=fetch(ud,target,limit,&length,final);
+            if(data&&((browser_url_secure(doc->url)&&!browser_url_secure(final))||(script&&!browser_same_origin(doc->url,final)))) { free(data); data=NULL; }
+            if(!data||memchr(data,0,(size_t)length)) {free(data);doc->assets_omitted++;continue;}
+            if(css) {
+                /* A stylesheet is downloaded whole, then reduced to the rules
+                   that can match this page: the rest of a framework's CSS isn't kept. */
+                downloaded+=(size_t)length;
+                size_t kept=0;char *compact=css_compact_for(data,(size_t)length,features,&kept);
+                free(data);data=compact;length=(int)kept;
+                if(!data||(size_t)length+1>DOM_BYTES_MAX-doc->dom->bytes) {free(data);doc->assets_omitted++;continue;}
+            }
+            if(script)script_bytes+=(size_t)length;else{css_bytes+=(size_t)length;doc->dom->bytes+=(size_t)length+1;}
+            free(n->text); n->text=data;
+            if(script)dom_set_attr(doc->dom,i,"src",final);
         }
-        const char *ref=dom_attr(n,script?"src":"href"); if(!*ref||(script&&!javascript))continue;
-        if(css&&javascript&&inside(doc->dom,i,"noscript"))continue;     /* not shown with JavaScript on */
-        char target[BROWSER_URL_MAX],final[BROWSER_URL_MAX]; int limit=script?512*1024:CSS_SHEET_MAX;
-        size_t left=script?1024*1024-script_bytes:css_bytes<CSS_TEXT_MAX&&downloaded<2*CSS_SHEET_MAX?2*CSS_SHEET_MAX-downloaded:0;
-        if(requests++>=16||!left||browser_url_resolve(base,ref,target,sizeof(target))<0||
-           (browser_url_secure(doc->url)&&!browser_url_secure(target))||(script&&!browser_same_origin(doc->url,target))) { doc->assets_omitted++; continue; }
-        if((size_t)limit>left)limit=(int)left;
-        int length=0; final[0]=0;
-        char *data=fetch(ud,target,limit,&length,final);
-        if(data&&((browser_url_secure(doc->url)&&!browser_url_secure(final))||(script&&!browser_same_origin(doc->url,final)))) { free(data); data=NULL; }
-        if(!data||memchr(data,0,(size_t)length)) {free(data);doc->assets_omitted++;continue;}
-        if(css) {
-            /* A stylesheet is downloaded whole, then reduced to the rules
-               that can match this page: the rest of a framework's CSS isn't kept. */
-            downloaded+=(size_t)length;
-            size_t kept=0;char *compact=css_compact(data,(size_t)length,doc->dom,&kept);
-            free(data);data=compact;length=(int)kept;
-            if(!data||(size_t)length+1>DOM_BYTES_MAX-doc->dom->bytes) {free(data);doc->assets_omitted++;continue;}
-        }
-        if(script)script_bytes+=(size_t)length;else{css_bytes+=(size_t)length;doc->dom->bytes+=(size_t)length+1;}
-        free(n->text); n->text=data;
-        if(script)dom_set_attr(doc->dom,i,"src",final);
+        css_features_free(features);
     }
 }

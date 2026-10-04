@@ -142,12 +142,26 @@ Checkboxes, radio buttons, drop-down lists, and submit and reset buttons work as
 on a computer, and labels point to their fields. Forms are sent with GET or POST
 (`application/x-www-form-urlencoded`); a form with one text field, such as a
 search box, is sent when you finish typing. Forms that upload files send only
-their text fields. Buttons handled by JavaScript don't respond, because scripts
-run only while the page loads.
+their text fields. Buttons and links that a page's scripts handle run those
+scripts when you click them (see JavaScript below).
 
 Cookies are kept in `cookies.txt` next to the app, so sites can keep you signed
-in. They are sent with page, stylesheet, script and `fetch` requests. Clear
-them from the Start menu.
+in. They are sent with page, stylesheet, script and `fetch` requests, and
+scripts read and set them through `document.cookie` (except HttpOnly ones).
+Clear them from the Start menu.
+
+## Cookie consent
+
+Sites asking you to accept or reject cookies (GDPR notices) can be answered:
+
+- Consent pages with their own forms, like Google's "Before you continue" and
+  Yahoo's, send your choice and continue to the page you asked for.
+- Notices run by the site's own scripts work as on a computer: the script
+  stores your choice in a cookie and closes the notice, or reloads the page.
+- A notice whose buttons do nothing here (its consent tool's script comes from
+  another site, which Flow doesn't load) closes when you press one of them, so
+  you can read the page. Your choice isn't stored, so it may ask again on
+  other pages.
 
 Some sites need more than this browser offers: Google, for example, may ask
 you to turn on JavaScript instead of showing results. DuckDuckGo Lite works.
@@ -165,7 +179,9 @@ info screen). Wi-Fi in PPSSPP uses the computer's internet connection.
 QuickJS 2026-06-04 supports modern language syntax including `let`/`const`, arrow
 functions, classes, destructuring, template strings, BigInt, promises and
 async/await. Inline and same-origin external scripts and ES modules run during
-loading, with bounded same-origin module imports and promise jobs.
+loading, with bounded same-origin module imports and promise jobs. A page
+without any script that can run (only other sites' scripts) is shown as without
+JavaScript, with its `<noscript>` content.
 
 The reader DOM implements element, text, comment and fragment creation,
 querySelector(All), matches and closest, ID, tag, class and name queries,
@@ -176,8 +192,24 @@ cloneNode, attributes, dataset, classList and inline style changes, plus
 handlers run before the page is laid out; a handler that throws doesn't stop
 the others. `fetch` and `XMLHttpRequest` support same-origin GET with text/JSON
 responses. Requests and redirects must remain same-origin; they carry the
-browser's cookies, but `document.cookie` reads as empty, and authorization and
-custom headers are absent. `URL`, `URLSearchParams`, `matchMedia` (answered as
+browser's cookies, and `document.cookie` reads and sets them (Domain, Path,
+Max-Age, Expires and Secure; never HttpOnly ones). Authorization and custom
+headers are absent.
+
+Scripts that handle clicks stay with their page after it loads, while they fit
+in 3 MB of memory (6 MB on a PSP-2000 or later): a click on an element they
+handle (their own listeners, a listener on an element around it, an `onclick`
+attribute, a form's submit listener) runs them, with pointer and click events
+that bubble, `preventDefault()`, and what you typed in the page's fields
+delivered first as `input` and `change` events. Their timers then run, a few
+rounds, and the page shows what they changed, keeping your place. Links,
+submit buttons, checkboxes and labels do what they do in a browser unless a
+handler prevents it; when the scripts change nothing, a link is followed and
+a form is sent anyway. Scripts can send the browser to another page:
+`location` (`href`, `assign()`, `replace()`, `reload()`), `form.submit()` and
+`requestSubmit()` (GET or POST), `window.open()`. A page that does this as it
+loads, or with a `<meta http-equiv=refresh>` of up to 10 seconds, is followed
+like a redirect, up to 5 times. Leaving a page stops its scripts. `URL`, `URLSearchParams`, `matchMedia` (answered as
 the stylesheets are, for 786 CSS pixels), `performance.now`, in-memory
 `localStorage`/`sessionStorage` and `CustomEvent` are available.
 
@@ -187,11 +219,11 @@ combinators, and structural pseudo-classes (`:not()`, `:is()`, `:first-child`,
 `:nth-child()` and the like, `:checked`, `:disabled`); an invalid selector throws
 a SyntaxError. Node collections are snapshots. The fragment parser is
 deliberately limited. Timers, intervals and animation frames each run once after
-loading; requested delays are not emulated. Mutation, intersection and resize
-observers exist but never report. There is no persistent event loop after
-loading, click handler dispatch, script-driven form submission, WebSocket,
-canvas, layout measurement (sizes read as 0), workers or OS bindings.
-`location` is a read-only address snapshot. Scripts from other sites aren't
+loading, and after a click; requested delays are not emulated. Mutation,
+intersection and resize observers exist but never report. There is no running
+event loop between clicks, no keyboard or focus events, WebSocket, canvas,
+layout measurement (sizes read as 0), workers or OS bindings; `history`
+methods do nothing. Scripts from other sites aren't
 downloaded, so pages built on a CDN's library (jQuery from a CDN) or entirely by
 a framework will still fail; failed scripts show available readable text.
 

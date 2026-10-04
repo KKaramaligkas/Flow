@@ -12,6 +12,7 @@
 #include "document.h"
 #include "layout.h"
 #include "picture.h"
+#include "script.h"
 #include "view.h"
 #include "version.h"
 #include "session.h"
@@ -52,6 +53,8 @@ static browser_line page_lines[MAX_LINES];
 static int line_count, scroll, selected=-1, link_list;
 static int menu, menu_selection;
 static char app_dir[192], downloads[224], message[256], failed_url[BROWSER_URL_MAX];
+/* a click the page's scripts are handling: the link or field clicked */
+static int clicked_link=-1, clicked_control=-1;
 enum { M_ADDRESS, M_BACK, M_FORWARD, M_RELOAD, M_LINKS, M_READER, M_DOWNLOAD, M_HOME, M_WIFI, M_JAVASCRIPT, M_COOKIES, M_EXIT, M_COUNT };
 
 static int exit_callback(int a,int b,void *ud)
@@ -325,13 +328,21 @@ static void draw_picker(void)
 static void status_line(char *out,size_t size)
 {
     const browser_view *v=view();
-    if(v&&hover_link>=0) { snprintf(out,size,"%s",view_string(v,v->links[hover_link].url)); return; }
+    if(v&&hover_link>=0) {
+        const view_link *l=&v->links[hover_link];
+        snprintf(out,size,"%s",l->url>=0?view_string(v,l->url):l->node>=0&&page->script?"Confirm: click (runs the page's script)":
+                 l->dismiss>=0?"Confirm: close this notice":"This needs the page's scripts");
+        return;
+    }
     if(v&&hover_control>=0) {
         static const char *hints[]={"Confirm: type text","Confirm: type a password","Confirm: type text","Confirm: check",
             "Confirm: choose","Confirm: choose an option","Confirm: send the form","Confirm: clear the form",
             "This button needs JavaScript","Confirm: send the form","","File uploads aren't supported"};
         const view_control *c=&v->controls[hover_control];
-        snprintf(out,size,"%s",c->disabled?"This field is disabled":hints[c->kind]);
+        const char *hint=c->disabled?"This field is disabled":hints[c->kind];
+        if(!c->disabled&&c->scripted&&page->script&&(c->kind==CONTROL_BUTTON||c->kind==CONTROL_SUBMIT||c->kind==CONTROL_IMAGE)) hint="Confirm: press";
+        else if(!c->disabled&&c->dismiss>=0&&(c->kind==CONTROL_BUTTON||((c->kind==CONTROL_SUBMIT||c->kind==CONTROL_IMAGE)&&c->form<0))) hint="Confirm: close this notice";
+        snprintf(out,size,"%s",hint);
         return;
     }
     if(!reader&&link_list) { snprintf(out,size,"%d links. Confirm: open   Cancel: close",page->count); return; }
@@ -384,13 +395,14 @@ static void draw_scene(void *ud)
     }
     if(browser_jobs_busy()) {
         gfx_round_rect(42,77,396,96,8,RGB(26,48,64));
-        text_draw(56,90,browser_work.type==BROWSER_JOB_DOWNLOAD?"Downloading file":browser_work.post?"Sending form":"Loading page",0.72f,FG,TEXT_BOLD);
+        int type=browser_work.type;
+        text_draw(56,90,type==BROWSER_JOB_DOWNLOAD?"Downloading file":type==BROWSER_JOB_CLICK?"Running the page's script":browser_work.post?"Sending form":"Loading page",0.72f,FG,TEXT_BOLD);
         char progress[128],done[24],total[24];
         int64_t d=browser_work.done,t=browser_work.total;
         pm_format_size(d,done,sizeof(done));
         if(t>0) { pm_format_size(t,total,sizeof(total)); snprintf(progress,sizeof(progress),"%s / %s",done,total); }
         else snprintf(progress,sizeof(progress),"%s received",done);
-        text_draw(56,120,progress,0.6f,ACCENT,0);
+        if(type!=BROWSER_JOB_CLICK) text_draw(56,120,progress,0.6f,ACCENT,0);
         text_draw(56,148,"Cancel: stop and keep the current page",0.5f,DIM,0);
     }
 }
@@ -500,9 +512,11 @@ static void navigate(const char *url,int mode,const char *post)
             size_t offset=0;for(int i=0;i<page->anchor_count;i++)if(!strcmp(page->anchors[i].id,fragment+1))offset=page->anchors[i].offset;
             for(int i=0;i<line_count;i++)if(page_lines[i].start+page_lines[i].length>=offset){scroll=i;break;}
             clamp_scroll();return;}}
-    if(!connect_wifi() || exit_requested) return;
+    if(!connect_wifi() || exit_requested || browser_jobs_busy()) return;
     message[0]=0; failed_url[0]=0;
     if(history.count) history.visits[history.current].scroll=(int)scroll_y;
+    /* the page's scripts are done: their memory is the next page's */
+    browser_script_free(page);
     /* this page's pictures make room for the next page */
     if(browser_pictures_stop(2000)==0) browser_pictures_release(page);
     if(browser_jobs_submit(BROWSER_JOB_PAGE,mode,target,NULL,javascript,post)<0) { notice("Could not start loading the page."); browser_pictures(page); }
@@ -531,7 +545,7 @@ static void open_address(void)
 static void download_file(void)
 {
     const browser_view *v=view();
-    const char *url=failed_url[0]?failed_url:v&&hover_link>=0?view_string(v,v->links[hover_link].url):
+    const char *url=failed_url[0]?failed_url:v&&hover_link>=0&&v->links[hover_link].url>=0?view_string(v,v->links[hover_link].url):
         reader&&selected>=0?page->links[selected].url:history.count?page->url:NULL;
     if(!url) { notice("Point at a link or open a page first."); return; }
     if(!connect_wifi() || exit_requested) return;
@@ -573,10 +587,56 @@ static void home(void)
     message[0]=failed_url[0]=0; layout();
     browser_pictures(page);
 }
+static void submit(int form,int submitter);
+static void dismiss(int notice);
+static void update_hover(void);
+static float anchor_shift(const browser_view *old,const browser_view *next);
+static void scroll_by(float shift);
+/* The page as its scripts changed it, in place of the page shown: their
+   scripts and pictures go with it, and the text at the top of the screen
+   stays there. */
+static void replace_page(browser_document *next)
+{
+    browser_pictures_forget();
+    browser_script_move(next,page);
+    next->pictures=page->pictures; page->pictures=NULL;
+    float shift=page->view&&next->view?anchor_shift(page->view,next->view):0;
+    browser_document_free(page); free(page); page=next;
+    selected=-1; picker=-1; layout();
+    scroll_by(shift);
+    update_hover();
+}
+/* A click the page's scripts did nothing with: what it does without them
+   (send the form, follow the link), or close the notice it's in. */
+static void click_unhandled(void)
+{
+    browser_view *v=page->view;
+    if(!v) return;
+    if(clicked_control>=0&&clicked_control<v->control_count) {
+        const view_control *c=&v->controls[clicked_control];
+        if((c->kind==CONTROL_SUBMIT||c->kind==CONTROL_IMAGE)&&c->form>=0) submit(c->form,clicked_control);
+        else if(c->dismiss>=0) dismiss(c->dismiss);
+    } else if(clicked_link>=0&&clicked_link<v->link_count) {
+        const view_link *l=&v->links[clicked_link];
+        if(l->url>=0) navigate(view_string(v,l->url),NAV_NEW,NULL);
+        else if(l->dismiss>=0) dismiss(l->dismiss);
+    }
+}
 static void collect(void)
 {
     if(!browser_work.finished) return;
     browser_document *loaded=browser_work.page;
+    if(browser_work.type==BROWSER_JOB_CLICK) {
+        browser_work.finished=0;
+        if(browser_work.result==0&&loaded) { browser_work.page=NULL; replace_page(loaded); }
+        else if(browser_work.result==0) click_unhandled();
+        else if(browser_work.cancel) notice("Cancelled. The page's script was stopped.");
+        else notice(browser_work.error[0]?browser_work.error:"The page's script stopped.");
+        if(browser_work.page) { browser_document_free(browser_work.page); free(browser_work.page); browser_work.page=NULL; }
+        clicked_link=clicked_control=-1;
+        if(!browser_jobs_busy()) browser_pictures(page);
+        return;
+    }
     if(browser_work.result==0 && browser_work.type==BROWSER_JOB_PAGE && loaded) {
         if(browser_history_commit(&history,browser_work.navigation,loaded->url)==0) {
             browser_pictures_forget(); browser_document_free(page); free(page); page=loaded; browser_work.page=NULL;
@@ -603,10 +663,33 @@ static void collect(void)
     browser_pictures(page);
 }
 static void update_hover(void);
+/* How far the text at the top of the screen moved from view `old` to
+   `next`, the page laid out again: the page scrolls with it. */
+static float anchor_shift(const browser_view *old,const browser_view *next)
+{
+    int top=(int)(scroll_y+0.5f),anchor=-1,best=-1;
+    for(int i=browser_view_first(old,top);browser_view_more(old,i,top+PAGE_H)&&anchor<0;i++)
+        if(old->items[i].kind==ITEM_TEXT&&old->items[i].y>=top) anchor=i;
+    for(int i=0;anchor>=0&&i<next->item_count;i++) {
+        const view_item *a=&old->items[anchor],*b=&next->items[i];
+        if(b->kind==ITEM_TEXT&&b->length==a->length&&!memcmp(next->text+b->text,old->text+a->text,(size_t)a->length)&&
+           (best<0||abs(i-anchor)<abs(best-anchor))) best=i;
+    }
+    return best>=0?(float)(next->items[best].y-old->items[anchor].y):0;
+}
+static void scroll_by(float shift)
+{
+    const browser_view *v=page->view;
+    scroll_y+=shift; scroll_to(scroll_target+shift);
+    float last=v&&v->height>PAGE_H?(float)(v->height-PAGE_H):0;
+    if(scroll_y>last) scroll_y=last;
+    if(scroll_y<0) scroll_y=0;
+}
 /* The page laid out again with its pictures' sizes: fields keep what was
    typed, and the text at the top of the screen stays there. */
 static void take_view(void)
 {
+    if(browser_jobs_busy()) return;     /* a click being handled refers to this view */
     browser_view *next=browser_pictures_view(page),*old=page->view;
     if(!next) return;
     float shift=0;
@@ -619,22 +702,11 @@ static void take_view(void)
                 b->checked=a->checked; b->selected=a->selected;
             }
         else picker=-1;
-        int top=(int)(scroll_y+0.5f),anchor=-1,best=-1;
-        for(int i=browser_view_first(old,top);browser_view_more(old,i,top+PAGE_H)&&anchor<0;i++)
-            if(old->items[i].kind==ITEM_TEXT&&old->items[i].y>=top) anchor=i;
-        for(int i=0;anchor>=0&&i<next->item_count;i++) {
-            const view_item *a=&old->items[anchor],*b=&next->items[i];
-            if(b->kind==ITEM_TEXT&&b->length==a->length&&!memcmp(next->text+b->text,old->text+a->text,(size_t)a->length)&&
-               (best<0||abs(i-anchor)<abs(best-anchor))) best=i;
-        }
-        if(best>=0) shift=(float)(next->items[best].y-old->items[anchor].y);
+        shift=anchor_shift(old,next);
         browser_view_free(old); free(old);
     }
     page->view=next;
-    scroll_y+=shift; scroll_to(scroll_target+shift);
-    float last=next->height>PAGE_H?(float)(next->height-PAGE_H):0;
-    if(scroll_y>last) scroll_y=last;
-    if(scroll_y<0) scroll_y=0;
+    scroll_by(shift);
     update_hover();     /* its items are new */
 }
 static void back(void)
@@ -664,11 +736,41 @@ static void submit(int form,int submitter)
     navigate(url,NAV_NEW,body);
     free(body);
 }
+/* ---- the page's scripts, and consent notices ---- */
+
+/* Closes a consent notice whose buttons do nothing else here: the page is
+   laid out again without it. */
+static void dismiss(int notice_node)
+{
+    for(int i=0;i<page->hidden_count;i++) if(page->hidden[i]==notice_node) return;
+    if(page->hidden_count>=BROWSER_HIDDEN_MAX) return;
+    page->hidden[page->hidden_count]=notice_node;
+    __asm__ __volatile__("" ::: "memory");      /* the worker reads the count, then the entries */
+    page->hidden_count++;
+    browser_relayout();
+    notice("Notice closed. It may show again on other pages of this site.");
+}
+/* A click on an element the page's scripts handle (`node`, a source_id),
+   with what the user typed: 0 when they're running it. */
+static int run_click(int node,int link,int control)
+{
+    if(!page->script||!javascript) return -1;
+    char *values=page->view?browser_view_values(page->view):NULL;
+    browser_pictures_stop(0);       /* the page is the worker's until the click is done */
+    int r=browser_jobs_click(page,node,values,javascript);
+    free(values);
+    if(r<0) { browser_pictures(page); return -1; }
+    message[0]=0; clicked_link=link; clicked_control=control;
+    return 0;
+}
 static void activate(int index)
 {
     browser_view *v=page->view;
     view_control *c=&v->controls[index];
     if(c->disabled) { notice("This field is disabled."); return; }
+    int button=c->kind==CONTROL_BUTTON||c->kind==CONTROL_SUBMIT||c->kind==CONTROL_IMAGE;
+    if(button&&c->scripted&&run_click(c->node,-1,index)==0) return;
+    if(button&&c->dismiss>=0&&(c->kind==CONTROL_BUTTON||c->form<0)) { dismiss(c->dismiss); return; }
     switch(c->kind) {
     case CONTROL_TEXT: case CONTROL_PASSWORD: case CONTROL_TEXTAREA: {
         if(c->readonly) { notice("This field can't be changed."); return; }
@@ -688,7 +790,8 @@ static void activate(int index)
     case CONTROL_SUBMIT: case CONTROL_IMAGE: submit(c->form,index); return;
     case CONTROL_RESET: browser_view_reset(v,c->form); return;
     case CONTROL_FILE: notice("File uploads aren't supported."); return;
-    default: notice("This button needs JavaScript, which runs only while the page loads."); return;
+    default: notice(javascript?"This button needs the page's scripts, which aren't running here. Reload the page to try again.":
+                    "This button needs JavaScript: turn it on in the menu (Start), then reload."); return;
     }
 }
 
@@ -735,8 +838,14 @@ static void click(void)
 {
     const browser_view *v=view();
     if(!v) return;
-    if(hover_control>=0) activate(hover_control);
-    else if(hover_link>=0) navigate(view_string(v,v->links[hover_link].url),NAV_NEW,NULL);
+    if(hover_control>=0) { activate(hover_control); return; }
+    if(hover_link<0) return;
+    const view_link *l=&v->links[hover_link];
+    if(l->node>=0&&run_click(l->node,hover_link,-1)==0) return;
+    if(l->url>=0) navigate(view_string(v,l->url),NAV_NEW,NULL);
+    else if(l->dismiss>=0) dismiss(l->dismiss);
+    else notice(javascript?"This needs the page's scripts, which aren't running here. Reload the page to try again.":
+                "This needs JavaScript: turn it on in the menu (Start), then reload.");
 }
 static void picker_input(const input_state *in)
 {
@@ -833,14 +942,18 @@ int main(int argc,char **argv)
     if(!app_dir[0]) strcpy(app_dir,"ms0:/PSP/GAME/Flow/");
     snprintf(downloads,sizeof(downloads),"%sdownloads/",app_dir);
     char ca[256]; snprintf(ca,sizeof(ca),"%scacert.pem",app_dir);
-    net_set_tls(ca,1); net_set_client("Mozilla/5.0 (PlayStation Portable; Mobile) Flow/" APP_VERSION,1);
+#define AGENT "Mozilla/5.0 (PlayStation Portable; Mobile) Flow/" APP_VERSION
+    net_set_tls(ca,1); net_set_client(AGENT,1);
     char cookies[256]; snprintf(cookies,sizeof(cookies),"%scookies.txt",app_dir); net_set_cookies(cookies);
     char cache_dir[256],cache[256];snprintf(cache_dir,sizeof(cache_dir),"%s.cache/",app_dir);
     int cache_ok=fs_mkdirs(cache_dir,NULL,NULL);snprintf(cache,sizeof(cache),"%s.cache/page.tmp",app_dir);
     home();
     if(text_fallback()) notice("No PSP fonts found (PPSSPP without a firmware): using a basic font. In PPSSPP, install a PSP firmware for nicer text.");
     adopt_ark_browser(); /* before the first request reads the cookie file */
-    if(!page || cache_ok<0 || browser_jobs_start(cache)<0) {
+    int started=page&&cache_ok>=0&&browser_jobs_start(cache)==0;
+    /* Scripts see the cookies, and those handling clicks stay with their page while they fit in memory. */
+    browser_script_setup(AGENT,net_cookie_string,net_cookie_set,(browser_jobs_roomy()?6:3)*1024*1024);
+    if(!started) {
         if(page) { notice("Could not start the browser worker. Press Cancel to exit."); input_state in; do { input_update(&in); frame(); } while(!exit_requested && !(in.pressed&BTN_CANCEL)); }
     } else {
         input_state in;

@@ -9,9 +9,13 @@
 #define BROWSER_TEXT_MAX (256 * 1024)
 #define BROWSER_LINKS_MAX 256
 #define BROWSER_ANCHORS_MAX 128
+#define BROWSER_HIDDEN_MAX 16
 
 typedef struct { char url[BROWSER_URL_MAX], label[96]; size_t offset; int node, kind; } browser_link;
 typedef struct { char id[96]; size_t offset; } browser_anchor;
+/* Where a page sends the browser on its own, as it loads or when clicked:
+   its scripts, or a <meta> refresh. `post`: form data to send (malloc'd). */
+typedef struct { char url[BROWSER_URL_MAX]; char *post; int replace; } browser_redirect;
 typedef struct {
     char *text;
     char title[128], url[BROWSER_URL_MAX];
@@ -29,6 +33,12 @@ typedef struct {
     const browser_dom *rendered; /* the DOM the text and styles were last made from */
     struct browser_view *view;  /* the laid-out page, NULL until built */
     struct picture_table *pictures; /* its pictures, when they're loaded (see picture.h) */
+    browser_redirect redirect;  /* set when the page sent the browser elsewhere as it loaded */
+    /* Elements the user closed (their DOM source_id): notices whose buttons
+       did nothing. Added to by the main thread while the page is laid out
+       again, never removed. */
+    int hidden[BROWSER_HIDDEN_MAX];
+    volatile int hidden_count;
 } browser_document;
 int browser_document_parse(browser_document *doc, const char *data, size_t length,
                            const char *url, const char *content_type, char *err, size_t errlen);
@@ -49,4 +59,7 @@ int browser_document_read(browser_document *,dom_read_fn,void *,const char *,con
                           dom_cancel_fn,void *,char *,size_t);
 int browser_document_render(browser_document *,char *,size_t);
 browser_style browser_style_at(const browser_document *,size_t);
+/* A <meta http-equiv=refresh> sending the browser to another address
+   within `seconds`: 1 and that address in `url`, else 0. */
+int browser_meta_refresh(const browser_document *doc,int seconds,char *url,size_t size);
 #endif

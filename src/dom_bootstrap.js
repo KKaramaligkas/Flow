@@ -1,7 +1,7 @@
 /* PSP reader DOM. No filesystem, process, or native module bindings. */
 (() => {
 'use strict';
-const nodes=__seed, wrappers=new Map(), listeners=new Map(), parents=nodes.map(()=>-1);
+const nodes=__seed, wrappers=new Map(), listeners=new Map(), listened=new Set(), parents=nodes.map(()=>-1);
 delete globalThis.__seed;
 nodes.forEach((n,i)=>{for(const c of n.children)parents[c]=i;});
 /* Scripts may add 2048 nodes to the page's, within the browser's 16,384. */
@@ -137,12 +137,58 @@ class Node {
  getElementsByTagName(t){return this.querySelectorAll(t);}getElementsByClassName(c){return this.querySelectorAll(String(c).trim().split(/\s+/).map(x=>'.'+x).join(''));}
  matches(s){return matching(this._id,list(String(s)));}closest(s){const l=list(String(s));for(let i=this._id;i>=0;i=parents[i])if(matching(i,l))return wrap(i);return null;}
  getBoundingClientRect(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}getClientRects(){return [];}
- get offsetParent(){return null;}focus(){}blur(){}scrollIntoView(){}scrollTo(){}click(){this.dispatchEvent(new Event('click'));}
- addEventListener(t,fn){if(typeof fn!=='function'&&typeof fn?.handleEvent!=='function')return;const key=this._id+':'+t;const a=listeners.get(key)||[];if(a.length>=64)throw Error('Listener limit');a.push(fn);listeners.set(key,a);}
+ get offsetParent(){return null;}focus(){}blur(){}scrollIntoView(){}scrollTo(){}click(){activate(this._id,false);}
+ addEventListener(t,fn){if(typeof fn!=='function'&&typeof fn?.handleEvent!=='function')return;const key=this._id+':'+t;const a=listeners.get(key)||[];if(a.includes(fn))return;if(a.length>=64)throw Error('Listener limit');a.push(fn);listeners.set(key,a);listened.add(this._id);}
  removeEventListener(t,fn){const k=this._id+':'+t;listeners.set(k,(listeners.get(k)||[]).filter(f=>f!==fn));}
- /* A listener that throws doesn't stop the others, as in a browser. */
- dispatchEvent(e){e.target=e.currentTarget=this;for(const f of listeners.get(this._id+':'+e.type)||[])try{typeof f==='function'?f.call(this,e):f.handleEvent(e);}catch(err){failures++;}const f=this['on'+e.type];if(typeof f==='function')try{f.call(this,e);}catch(err){failures++;}return !e.defaultPrevented;}
+ dispatchEvent(e){return dispatch(this._id,e);}
+ get form(){const f=formOf(this._id);return f>=0?wrap(f):null;}get elements(){return this.querySelectorAll('input,select,textarea,button');}
+ submit(){submitForm(this._id,-1,false);}requestSubmit(s){submitForm(this._id,s instanceof Node?s._id:-1,true);}
 }
+/* An event at node `id`: the listeners, script-set on<type> property or
+   inline on<type> attribute of the node, then of each node above it as it
+   bubbles. A listener that throws doesn't stop the others, as in a browser. */
+const compiled=new Map();
+function inline(i,type){const code=nodes[i].attrs['on'+type];if(!code)return null;const key=i+':'+type+':'+code;if(compiled.has(key))return compiled.get(key);let f=null;try{f=new Function('event',code);}catch(err){failures++;}if(compiled.size>=256)compiled.clear();compiled.set(key,f);return f;}
+function dispatch(id,e){if(!(e instanceof Event))throw new TypeError('Not an event');e.target=wrap(id);e._stop=e._now=false;
+ for(let i=id,d=0;i>=0&&d<=64&&!e._stop;i=parents[i],d++){const w=wrap(i);e.currentTarget=w;e.eventPhase=d?3:2;
+  for(const f of (listeners.get(i+':'+e.type)||[]).slice()){if(e._now)break;try{typeof f==='function'?f.call(w,e):f.handleEvent(e);}catch(err){failures++;}}
+  const own=w['on'+e.type],f=typeof own==='function'?own:inline(i,e.type);
+  if(f&&!e._now)try{if(f.call(w,e)===false)e.preventDefault();}catch(err){failures++;}
+  if(!e.bubbles)break;}
+ e.currentTarget=null;e.eventPhase=0;return !e.defaultPrevented;}
+/* A click on node `id` and what it does by default when nothing prevents
+   it: a link goes to its address (or runs its javascript: one), a submit
+   button submits its form. */
+function activate(id,user,depth=0){const n=nodes[id],a=n.attrs,type=(a.type||'').toLowerCase(),box=n.tag==='input'&&(type==='checkbox'||type==='radio'),was='checked' in a;
+ if(box&&!('disabled' in a)){if(type==='radio')for(const r of radios(id))delete nodes[r].attrs.checked;if(type==='radio'||!was)a.checked='';else delete a.checked;changed=true;}
+ const e=new MouseEvent('click',{bubbles:true,cancelable:true,composed:true,detail:1});e.isTrusted=!!user;
+ if(!dispatch(id,e)){if(box){if(was)a.checked='';else delete a.checked;}return;}
+ if(box){if(was!==('checked' in a)){dispatch(id,new InputEvent('input',{bubbles:true}));dispatch(id,new Event('change',{bubbles:true}));}return;}
+ for(let i=id,d=0;i>0&&d<=64;i=parents[i],d++){const n=nodes[i],a=n.attrs;
+  if((n.tag==='a'||n.tag==='area')&&'href' in a){const h=a.href.trim();if(/^javascript:/i.test(h)){try{(0,eval)(decodeURIComponent(h.slice(11)));}catch(err){failures++;}}else if(h&&h[0]!=='#')go(h,false);return;}
+  if((n.tag==='button'&&!/^(button|reset)$/i.test(a.type||''))||(n.tag==='input'&&/^(submit|image)$/i.test(a.type||''))){const f=formOf(i);if(f>=0&&!('disabled' in a))submitForm(f,i,true);return;}
+  if(n.tag==='label'&&depth<4){const c=a.for?document.getElementById(a.for):wrap(i).querySelector('input,select,textarea,button');if(c&&!c.contains(wrap(id)))activate(c._id,user,depth+1);return;}}}
+/* The other radio buttons of the group radio button `id` is in. */
+function radios(id){const name=nodes[id].attrs.name,f=formOf(id);if(!name)return [];return wrap(f>=0?f:0).querySelectorAll('input').map(w=>w._id).filter(i=>i!==id&&(nodes[i].attrs.type||'').toLowerCase()==='radio'&&nodes[i].attrs.name===name&&formOf(i)===f);}
+function formOf(i){const own=nodes[i]?.attrs.form;if(own){const f=document.getElementById(own);if(f&&raw(f).tag==='form')return f._id;}for(let p=parents[i],d=0;p>0&&d<=64;p=parents[p],d++)if(nodes[p].tag==='form')return p;return -1;}
+/* What a form sends: its named, enabled fields, as a browser collects them. */
+function fields(form,submitter){const out=[];
+ for(const w of wrap(form).querySelectorAll('input,select,textarea,button')){const i=w._id,n=nodes[i],a=n.attrs,name=a.name,type=(a.type||'').toLowerCase();if(!name||'disabled' in a)continue;
+  if(n.tag==='button'||(n.tag==='input'&&/^(submit|image|button|reset)$/.test(type))){if(i===submitter)out.push([name,a.value??'']);continue;}
+  if(n.tag==='input'&&/^(checkbox|radio)$/.test(type)){if('checked' in a)out.push([name,a.value??'on']);continue;}
+  if(n.tag==='input'&&type==='file')continue;
+  if(n.tag==='select'){const options=w.querySelectorAll('option');let any=false;for(const o of options)if('selected' in raw(o).attrs){out.push([name,raw(o).attrs.value??o.textContent]);any=true;if(!('multiple' in a))break;}
+   if(!any&&options.length&&!('multiple' in a))out.push([name,raw(options[0]).attrs.value??options[0].textContent]);continue;}
+  out.push([name,n.tag==='textarea'?w.textContent:a.value??'']);}
+ return out;}
+function submitForm(form,submitter,fire){
+ if(fire&&!dispatch(form,new SubmitEvent('submit',{bubbles:true,cancelable:true,submitter:submitter>=0?wrap(submitter):null})))return;
+ const a=nodes[form].attrs,s=submitter>=0?nodes[submitter].attrs:{},action=s.formaction??a.action??'',method=(s.formmethod??a.method??'get').toLowerCase();
+ const body=fields(form,submitter).map(([k,v])=>escape(k)+'='+escape(v)).join('&'),target=__resolve(action||__url);
+ if(method==='post')go(target,false,body);else go(target.replace(/[?#].*$/,'')+'?'+body,false);}
+/* Where the page asked to go: the browser goes there once scripts are done. */
+let navigation=null;
+function go(url,replace,post){try{navigation={url:__resolve(String(url)),replace:!!replace,post:post==null?null:String(post)};}catch(err){failures++;}}
 let failures=0;
 /* Sizes and positions aren't laid out here. */
 for(const k of ['offsetWidth','offsetHeight','offsetTop','offsetLeft','clientWidth','clientHeight','clientTop','clientLeft','scrollWidth','scrollHeight','scrollTop','scrollLeft'])Object.defineProperty(Node.prototype,k,{get:()=>0,set(){},configurable:true});
@@ -154,10 +200,21 @@ Object.assign(document,{createElement:t=>create(String(t).toLowerCase()),createE
  write:(...s)=>fragment(document.body||document,s.join('')),writeln:(...s)=>fragment(document.body||document,s.join('')+'\n'),readyState:'loading',hasFocus:()=>false,createEvent:()=>new Event('')});
 Object.defineProperties(document,{body:{get:()=>find('body')||document},head:{get:()=>find('head')},documentElement:{get:()=>find('html')},scrollingElement:{get:()=>find('html')},activeElement:{get:()=>find('body')},
  title:{get:()=>document.querySelector('title')?.textContent||'',set:v=>{let t=document.querySelector('title');if(!t){t=create('title');(document.head||document).appendChild(t);}t.textContent=v;}},
- URL:{value:__url},documentURI:{value:__url},cookie:{get:()=>'',set(){}},referrer:{value:''},defaultView:{get:()=>globalThis},location:{get:()=>location},
+ URL:{value:__url},documentURI:{value:__url},cookie:{get:()=>__cookie(),set:v=>{__set_cookie(String(v));}},referrer:{value:''},defaultView:{get:()=>globalThis},location:{get:()=>location,set:v=>go(v,false)},
  visibilityState:{value:'visible'},hidden:{value:false},characterSet:{value:'UTF-8'},compatMode:{value:'CSS1Compat'},contentType:{value:'text/html'}});
-class Event {constructor(type,o={}){this.type=String(type);this.bubbles=!!o?.bubbles;this.cancelable=!!o?.cancelable;this.defaultPrevented=false;this.timeStamp=Date.now();}preventDefault(){this.defaultPrevented=true;}stopPropagation(){}stopImmediatePropagation(){}initEvent(type){this.type=String(type);}}
+class Event {constructor(type,o={}){this.type=String(type);this.bubbles=!!o?.bubbles;this.cancelable=!!o?.cancelable;this.composed=!!o?.composed;this.defaultPrevented=false;this.isTrusted=false;this.timeStamp=Date.now();this.target=this.currentTarget=null;this.eventPhase=0;}
+ preventDefault(){if(this.cancelable)this.defaultPrevented=true;}get returnValue(){return !this.defaultPrevented;}set returnValue(v){if(!v)this.preventDefault();}
+ stopPropagation(){this._stop=true;}stopImmediatePropagation(){this._stop=this._now=true;}get cancelBubble(){return !!this._stop;}set cancelBubble(v){if(v)this._stop=true;}
+ composedPath(){const p=[];for(let i=this.target?._id??-1,d=0;i>=0&&d<=64;i=parents[i],d++)p.push(wrap(i));return p;}initEvent(type,b,c){this.type=String(type);this.bubbles=!!b;this.cancelable=!!c;}}
 class CustomEvent extends Event {constructor(type,o={}){super(type,o);this.detail=o?.detail??null;}}
+class UIEvent extends Event {constructor(type,o={}){super(type,o);this.detail=o?.detail??0;this.view=globalThis;}}
+class MouseEvent extends UIEvent {constructor(type,o={}){super(type,o);for(const k of ['screenX','screenY','clientX','clientY','pageX','pageY','offsetX','offsetY','movementX','movementY'])this[k]=o?.[k]??0;
+ this.button=o?.button??0;this.buttons=o?.buttons??0;this.which=this.button+1;this.ctrlKey=!!o?.ctrlKey;this.shiftKey=!!o?.shiftKey;this.altKey=!!o?.altKey;this.metaKey=!!o?.metaKey;this.relatedTarget=o?.relatedTarget??null;}getModifierState(){return false;}}
+class PointerEvent extends MouseEvent {constructor(type,o={}){super(type,o);this.pointerId=o?.pointerId??1;this.pointerType=o?.pointerType??'mouse';this.isPrimary=true;this.width=this.height=1;this.pressure=0;}}
+class KeyboardEvent extends UIEvent {constructor(type,o={}){super(type,o);this.key=o?.key??'';this.code=o?.code??'';this.keyCode=this.which=o?.keyCode??0;}getModifierState(){return false;}}
+class FocusEvent extends UIEvent {constructor(type,o={}){super(type,o);this.relatedTarget=o?.relatedTarget??null;}}
+class InputEvent extends UIEvent {constructor(type,o={}){super(type,o);this.data=o?.data??null;this.inputType=o?.inputType??'';}}
+class SubmitEvent extends Event {constructor(type,o={}){super(type,o);this.submitter=o?.submitter??null;}}
 /* Addresses: the page's location, URL and URLSearchParams. */
 function parts(href){const m=String(href).match(/^([a-z][\w+.-]*:)(?:\/\/(?:[^@/?#]*@)?([^/?#:]*)(?::(\d*))?)?([^?#]*)(\?[^#]*)?(#.*)?$/i);if(!m)throw new TypeError('Invalid URL');return {protocol:m[1].toLowerCase(),hostname:(m[2]||'').toLowerCase(),port:m[3]||'',pathname:m[4]||(m[2]!==undefined?'/':''),search:m[5]&&m[5]!=='?'?m[5]:'',hash:m[6]&&m[6]!=='#'?m[6]:''};}
 const unescape=s=>{try{return decodeURIComponent(s.replace(/\+/g,' '));}catch{return s;}}, escape=s=>encodeURIComponent(s).replace(/%20/g,'+');
@@ -173,7 +230,11 @@ class URL {
  get host(){return this.hostname+(this.port?':'+this.port:'');}get origin(){return this.protocol+'//'+this.host;}
  get href(){return this.protocol+(this.hostname||this.protocol==='file:'?'//'+this.host:'')+this.pathname+this.search+this.hash;}set href(v){Object.assign(this,parts(__resolve(String(v))));}
  toString(){return this.href;}toJSON(){return this.href;}static canParse(u,base){try{new URL(u,base);return true;}catch{return false;}}}
-const location=Object.freeze(Object.assign(parts(__url),{href:__url,origin:new URL(__url).origin,host:new URL(__url).host,toString:()=>__url,assign(){},replace(){},reload(){}}));
+const here=parts(__url),bare=()=>__url.replace(/[?#].*$/,'');
+const location=Object.freeze({get href(){return __url;},set href(v){go(v,false);},get protocol(){return here.protocol;},get hostname(){return here.hostname;},get port(){return here.port;},
+ get host(){return here.hostname+(here.port?':'+here.port:'');},get origin(){return here.protocol+'//'+this.host;},get pathname(){return here.pathname;},set pathname(v){go(new URL(String(v),__url).href,false);},
+ get search(){return here.search;},set search(v){v=String(v);go(bare()+(v&&v[0]!=='?'?'?':'')+v,false);},get hash(){return here.hash;},set hash(v){},
+ assign(u){go(u,false);},replace(u){go(u,true);},reload(){go(__url,true);},toString(){return __url;}});
 /* Timers run once each at the end of loading: delays aren't emulated, and
    intervals and animation frames run once. */
 let timerID=0;const timers=new Map();
@@ -193,12 +254,12 @@ class XMLHttpRequest {
 Object.assign(XMLHttpRequest,{UNSENT:0,OPENED:1,HEADERS_RECEIVED:2,LOADING:3,DONE:4});
 Object.assign(globalThis,{document,Node,Element:Node,HTMLElement:Node,SVGElement:Node,Text:Node,Comment:Node,DocumentFragment:Node,Document:Node,HTMLDocument:Node,
  HTMLAnchorElement:Node,HTMLButtonElement:Node,HTMLDivElement:Node,HTMLFormElement:Node,HTMLImageElement:Node,HTMLInputElement:Node,HTMLScriptElement:Node,HTMLSelectElement:Node,HTMLSpanElement:Node,HTMLTemplateElement:Node,HTMLTextAreaElement:Node,
- Event,CustomEvent,URL,URLSearchParams,XMLHttpRequest,window:globalThis,self:globalThis,top:globalThis,parent:globalThis,frames:globalThis,
- navigator:{userAgent:'Mozilla/5.0 (PlayStation Portable; Mobile) Flow/0.3',platform:'PSP',language:'en',languages:['en'],onLine:true,cookieEnabled:false,maxTouchPoints:0,sendBeacon:()=>false},
- location,history:{length:1,state:null,scrollRestoration:'auto',pushState(){},replaceState(){},back(){},forward(){},go(){}},
+ Event,CustomEvent,UIEvent,MouseEvent,PointerEvent,KeyboardEvent,FocusEvent,InputEvent,SubmitEvent,URL,URLSearchParams,XMLHttpRequest,window:globalThis,self:globalThis,top:globalThis,parent:globalThis,frames:globalThis,
+ navigator:{userAgent:__agent,platform:'PSP',language:'en',languages:['en'],onLine:true,cookieEnabled:__cookies,maxTouchPoints:0,sendBeacon:()=>false},
+ history:{length:1,state:null,scrollRestoration:'auto',pushState(){},replaceState(){},back(){},forward(){},go(){}},
  screen:{width:480,height:272,availWidth:480,availHeight:272,colorDepth:32,pixelDepth:32},
  innerWidth:786,innerHeight:453,outerWidth:786,outerHeight:453,devicePixelRatio:1,scrollX:0,scrollY:0,pageXOffset:0,pageYOffset:0,
- scrollTo(){},scrollBy(){},scroll(){},focus(){},blur(){},open:()=>null,close(){},print(){},postMessage(){},getSelection:()=>null,
+ scrollTo(){},scrollBy(){},scroll(){},focus(){},blur(){},open:u=>{if(u)go(u,false);return null;},close(){},print(){},postMessage(){},getSelection:()=>null,
  getComputedStyle:n=>n.style,matchMedia:q=>({matches:__media(String(q)),media:String(q),onchange:null,addListener(){},removeListener(){},addEventListener(){},removeEventListener(){}}),
  localStorage:storage(),sessionStorage:storage(),performance:{timeOrigin:start,now:()=>Date.now()-start,mark(){},measure(){},getEntriesByName:()=>[],getEntriesByType:()=>[]},
  MutationObserver:observer,IntersectionObserver:observer,ResizeObserver:observer,PerformanceObserver:observer,customElements:{define(){},get:()=>undefined,whenDefined:()=>new Promise(()=>{})},
@@ -206,11 +267,52 @@ Object.assign(globalThis,{document,Node,Element:Node,HTMLElement:Node,SVGElement
  setTimeout:(f,ms,...a)=>later(f,a),clearTimeout:cancel,setInterval:(f,ms,...a)=>later(f,a),clearInterval:cancel,
  requestAnimationFrame:f=>later(f,[performance.now()]),cancelAnimationFrame:cancel,requestIdleCallback:f=>later(f,[{didTimeout:false,timeRemaining:()=>0}]),cancelIdleCallback:cancel,
  queueMicrotask:f=>{Promise.resolve().then(f);}});
+Object.defineProperty(globalThis,'location',{get:()=>location,set:v=>go(v,false),configurable:true});
 globalThis.addEventListener=(t,f)=>document.addEventListener(t,f);globalThis.removeEventListener=(t,f)=>document.removeEventListener(t,f);globalThis.dispatchEvent=e=>document.dispatchEvent(e);
 globalThis.fetch=async url=>{const body=__fetch(String(url instanceof URL?url.href:url?.url??url));return {ok:true,status:200,url:__resolve(String(url instanceof URL?url.href:url?.url??url)),headers:{get:()=>null},text:async()=>body,json:async()=>JSON.parse(body)};};
 globalThis.__finish=()=>{document.readyState='interactive';document.dispatchEvent(new Event('DOMContentLoaded'));document.readyState='complete';document.dispatchEvent(new Event('load'));if(typeof globalThis.onload==='function')try{globalThis.onload(new Event('load'));}catch(e){failures++;}const pending=[...timers.values()];timers.clear();for(const f of pending)try{f();}catch(e){failures++;}if(failures)throw Error(failures+' event listeners or timers failed');};
-/* The page as JSON for the browser, or '' when scripts left it as it was.
-   Nothing runs afterwards, so the scripts' DOM is let go at once: the
-   browser's copy of the text needs room. */
-globalThis.__snapshot=()=>{const json=changed?JSON.stringify(nodes):'';nodes.length=0;parents.length=0;wrappers.clear();listeners.clear();timers.clear();parsed.clear();return json;};
+/* Where the page's scripts asked to go ({url, replace, post}), or null to stay. */
+globalThis.__navigation=()=>{const n=navigation;navigation=null;return n;};
+/* Timers set since: each runs once. How many were set meanwhile. */
+globalThis.__timers=()=>{const pending=[...timers.values()];timers.clear();for(const f of pending)try{f();}catch(e){failures++;}return timers.size;};
+/* The nodes a click does something on: with their own pointer or click
+   handlers (listeners, properties, inline attributes), forms that handle
+   their submission, and buttons and buttonlike links under an element
+   handling clicks for them. An element handling the clicks of the buttons
+   and links it holds (a page's root, a menu) isn't one thing to click. */
+const POINTER=['click','mousedown','mouseup','pointerdown','pointerup','touchstart','touchend'],ON_POINTER=POINTER.map(t=>'on'+t);
+function handles(i,types,on){const a=nodes[i].attrs,w=wrappers.get(i);
+ if(listened.has(i))for(const t of types)if(listeners.get(i+':'+t)?.length)return true;
+ for(const k of on)if(a[k]||(w&&typeof w[k]==='function'))return true;return false;}
+function interactive(n){const a=n.attrs;if(n.tag==='a')return !('href' in a)||/^\s*(#|javascript:)/i.test(a.href);
+ return n.tag==='button'||n.tag==='summary'||(n.tag==='input'&&/^(button|submit|image|checkbox|radio)$/i.test(a.type||''))||/^(button|link|tab|menuitem|checkbox|switch|option|radio)$/i.test(a.role||'')||'tabindex' in a;}
+function holds(i){const stack=nodes[i].children.slice();for(let k=0;stack.length;k++){if(k>400)return true;const n=nodes[stack.pop()];if(n.tag.charCodeAt(0)===35)continue;
+  if(interactive(n)||n.tag==='a'||n.tag==='input'||n.tag==='select'||n.tag==='textarea')return true;for(const c of n.children)stack.push(c);}return false;}
+globalThis.__clickables=()=>{const out=[],delegates=new Set(),reached=new Uint8Array(nodes.length),stack=[0];
+ while(stack.length){const i=stack.pop();if(reached[i])continue;reached[i]=1;for(const c of nodes[i].children)stack.push(c);}
+ for(let i=0;i<nodes.length;i++)if(handles(i,POINTER,ON_POINTER))delegates.add(i);
+ for(let i=1;i<nodes.length;i++){const n=nodes[i];if(!reached[i]||n.tag.charCodeAt(0)===35)continue;
+  if(n.tag==='form'){if(handles(i,['submit'],['onsubmit']))out.push(i);continue;}
+  if(!delegates.size)continue;
+  if(delegates.has(i)&&(interactive(n)||(!/^(html|body|main)$/.test(n.tag)&&!holds(i)))){out.push(i);continue;}
+  if(interactive(n))for(let p=parents[i],d=0;p>=0&&d<=64;p=parents[p],d++)if(delegates.has(p)){out.push(i);break;}}
+ return out;};
+/* A click by the browser's user on node `id`: the pointer events, then the click. */
+globalThis.__click=id=>{if(!nodes[id]||!connected(id))return;for(const t of ['pointerdown','mousedown','pointerup','mouseup'])dispatch(id,new (t[0]==='p'?PointerEvent:MouseEvent)(t,{bubbles:true,cancelable:true,composed:true,buttons:t.endsWith('down')?1:0}));activate(id,true);};
+/* What the user typed and chose in the page's fields before a click:
+   [id, value, checked, selected option], each null when not changed. The
+   page hears of each change as it would have as it happened: input and
+   change events. */
+globalThis.__set_values=list=>{const was=changed,moved=[];
+ for(const [id,value,checked,selected] of list){const n=nodes[id];if(!n||!connected(id))continue;let m=false;
+  if(value!=null){const old=n.tag==='textarea'?wrap(id).textContent:n.attrs.value??'';if(old!==String(value)){if(n.tag==='textarea')wrap(id).textContent=String(value);else n.attrs.value=String(value);m=true;}}
+  if(checked!=null&&!!checked!==('checked' in n.attrs)){if(checked)n.attrs.checked='';else delete n.attrs.checked;m=true;}
+  if(selected!=null&&n.tag==='select')wrap(id).querySelectorAll('option').forEach((o,k)=>{const on=k===selected;if(on!==('selected' in raw(o).attrs)){if(on)raw(o).attrs.selected='';else delete raw(o).attrs.selected;m=true;}});
+  if(m)moved.push(id);}
+ changed=was;
+ for(const id of moved){dispatch(id,new InputEvent('input',{bubbles:true}));dispatch(id,new Event('change',{bubbles:true}));}};
+/* The page as JSON for the browser, or '' when scripts left it as it was
+   since the last time. When nothing more will run, the scripts' DOM is let
+   go at once: the browser's copy of the text needs room. */
+globalThis.__snapshot=keep=>{const json=changed?JSON.stringify(nodes):'';changed=false;if(!keep){nodes.length=0;parents.length=0;wrappers.clear();listeners.clear();timers.clear();parsed.clear();compiled.clear();}return json;};
 })();

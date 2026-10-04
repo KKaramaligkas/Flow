@@ -39,9 +39,16 @@ typedef struct {
     int checked, checked_initial, selected, selected_initial, option_first, option_count;
     int disabled, readonly, maxlength;
     int single;                             /* a one-line text field */
+    int node;                               /* its DOM node's source_id */
+    int scripted;                           /* a click on it (or its form's submission) runs the page's scripts */
+    int dismiss;                            /* the consent notice it's in (a source_id), or -1 */
 } view_control;
-typedef struct { int action, post, multipart, fields; } view_form;   /* fields: text fields */
-typedef struct { int url; } view_link;
+typedef struct { int action, post, multipart, fields, scripted; } view_form;   /* fields: text fields */
+/* A link, or something else to click: an element the page's scripts handle
+   (`node`, its DOM source_id, else -1), or a button of a consent notice
+   (`dismiss`, the notice's source_id, else -1) that closes it when nothing
+   else does. `url` is -1 for those without an address. */
+typedef struct { int url, node, dismiss; } view_link;
 typedef struct { int id, y; } view_anchor;
 
 typedef struct browser_view {
@@ -95,4 +102,7 @@ int browser_view_submits_on_enter(const browser_view *, int control);
    POST: *body is malloc'd application/x-www-form-urlencoded data. */
 int browser_view_submit(const browser_view *, int form, int submitter, char *url, size_t url_size,
                         char **body, char *err, size_t errlen);
+/* What the user changed in the page's fields, for its scripts (malloc'd
+   JSON, see browser_script_click()), or NULL when nothing changed. */
+char *browser_view_values(const browser_view *);
 #endif

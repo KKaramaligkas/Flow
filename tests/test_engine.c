@@ -89,6 +89,13 @@ static void compacting(void){
     CHECK(c&&strstr(c,".a{color:red}")&&strstr(c,".b{color:green}")&&strstr(c,"#c{color:red}"));
     CHECK(c&&!strstr(c,"missing")&&!strstr(c,"nothere")&&!strstr(c,"font-face")&&!strstr(c,"@media"));
     free(c);
+    /* classes and ids the page's scripts name, to give elements later */
+    browser_document *s=parse("<div id=banner class=cookie-banner>x</div><script>b.classList.add(\"cookie-banner--hidden\");q('.menu.is-open, #panel-2');var t=`x ${y} late-class`;</script>");
+    const char *later=".cookie-banner--hidden{display:none}.is-open{color:red}#panel-2{color:blue}.late-class{color:green}.never-named{color:black}.menu.is-open{display:block}";
+    c=css_compact(later,strlen(later),s->dom,&length);
+    CHECK(c&&strstr(c,".cookie-banner--hidden{")&&strstr(c,".is-open{")&&strstr(c,"#panel-2{")&&strstr(c,".late-class{")&&strstr(c,".menu.is-open{"));
+    CHECK(c&&!strstr(c,"never-named"));
+    free(c);drop(s);
     const char *registered="@property --x{syntax:'*';initial-value:2px}.a{margin:var(--x)}";
     c=css_compact(registered,strlen(registered),d->dom,&length);
     CHECK(c&&strstr(c,"@property --x{")&&strstr(c,"initial-value:2px"));
@@ -199,4 +206,122 @@ static void script_dom(void)
     CHECK(d->scripts_run==0&&d->scripts_failed==1&&strstr(d->text,"untouched")&&!strstr(d->text,"ran"));
     drop(d);free(big);
 }
-int main(void){modern();mutation();fetching();modules();limits();styling();streaming();spans();layout();scripts_fit();dom_size();media();selectors();compacting();implied();script_dom();printf("engine: %d checks, %d failures\n",checks,failures);return failures?1:0;}
+/* ---- the browser's side of scripts: cookies, navigation, clicks ---- */
+static char jar[512],jar_url[256];
+static int jar_get(const char *url,char *out,int size){snprintf(jar_url,sizeof(jar_url),"%s",url);snprintf(out,(size_t)size,"%s",jar);return 0;}
+static int jar_set(const char *url,const char *cookie){snprintf(jar_url,sizeof(jar_url),"%s",url);size_t n=strcspn(cookie,";");if(*jar&&strlen(jar)+n+2<sizeof(jar))strcat(jar,"; ");if(strlen(jar)+n<sizeof(jar))strncat(jar,cookie,n);return 0;}
+/* The source_id of the element with this id, -1 when there's none. */
+static int node_of(const browser_dom *dom,const char *id){for(int i=0;i<dom->count;i++)if(!strcmp(dom_attr(&dom->nodes[i],"id"),id))return dom->nodes[i].source_id;return -1;}
+static int marked(const browser_dom *dom,const char *id){for(int i=0;i<dom->count;i++)if(!strcmp(dom_attr(&dom->nodes[i],"id"),id))for(int k=0;k<dom->nodes[i].attribute_count;k++)if(!strcmp(dom->nodes[i].attributes[k].name,"data-flow-click"))return 1;return 0;}
+static int has_text(const browser_dom *dom,const char *text){for(int i=0;i<dom->count;i++)if(dom->nodes[i].text&&strstr(dom->nodes[i].text,text))return 1;return 0;}
+/* A click on element `id`: the DOM the scripts left (freed by the caller) and where they went. */
+static int click(browser_document *d,const char *id,const char *values,browser_dom **changed,browser_redirect *to){char err[256];return browser_script_click(d,node_of(d->dom,id),values,NULL,NULL,NULL,NULL,1000,changed,to,err,sizeof(err));}
+static void drop_dom(browser_dom *dom){if(dom){dom_free(dom);free(dom);}}
+static void browser_side(void)
+{
+    browser_script_setup("TestAgent/1.0",jar_get,jar_set,4*1024*1024);
+    /* document.cookie and navigator */
+    jar[0]=0;
+    browser_document *d=parse("<p id=out></p><script>document.cookie='a=1; path=/; max-age=60';document.cookie='b=2';document.getElementById('out').textContent=[document.cookie,navigator.userAgent,navigator.cookieEnabled].join('|');</script>");
+    run(d);CHECK(strstr(d->text,"a=1; b=2|TestAgent/1.0|true"));CHECK(!strcmp(jar_url,"https://example.org/path/page"));CHECK(!d->script);drop(d);
+    /* where scripts send the browser as the page loads */
+    d=parse("<script>location.replace('/consent?x=1');</script>");run(d);
+    CHECK(!strcmp(d->redirect.url,"https://example.org/consent?x=1")&&d->redirect.replace&&!d->redirect.post);drop(d);
+    d=parse("<script>window.location='next#top';</script>");run(d);CHECK(!strcmp(d->redirect.url,"https://example.org/path/next#top")&&!d->redirect.replace);drop(d);
+    d=parse("<script>location.href='mailto:x@example.org';</script>");run(d);CHECK(!d->redirect.url[0]);drop(d);
+    d=parse("<form id=f method=post action=/save><input type=hidden name=a value=1><input name=b value='two words'><input type=checkbox name=c><input type=checkbox name=d checked value=on2><input name=e disabled value=x><select name=s><option>one<option selected value=2>two</select><textarea name=t>long\ntext</textarea></form><script>document.getElementById('f').submit();</script>");
+    run(d);CHECK(!strcmp(d->redirect.url,"https://example.org/save"));CHECK(d->redirect.post&&!strcmp(d->redirect.post,"a=1&b=two+words&d=on2&s=2&t=long%0Atext"));
+    if(d->redirect.post&&strcmp(d->redirect.post,"a=1&b=two+words&d=on2&s=2&t=long%0Atext")){fprintf(stderr,"post: %s\n",d->redirect.post);}drop(d);
+    d=parse("<form id=f action='/find?old=1'><input name=q value='a&b'></form><script>const f=document.getElementById('f');f.addEventListener('submit',e=>e.preventDefault());f.requestSubmit();setTimeout(()=>f.submit(),10);</script>");
+    run(d);CHECK(!strcmp(d->redirect.url,"https://example.org/find?q=a%26b"));drop(d);
+    /* a <meta> refresh, soon enough, outside <noscript> when scripts run */
+    char url[BROWSER_URL_MAX];
+    d=parse("<head><meta http-equiv=Refresh content=\"0; URL='/later?a=1'\"></head><p>wait</p>");CHECK(browser_meta_refresh(d,10,url,sizeof(url))==1&&!strcmp(url,"https://example.org/later?a=1"));drop(d);
+    d=parse("<meta http-equiv=refresh content='30;url=/x'>");CHECK(browser_meta_refresh(d,10,url,sizeof(url))==0);drop(d);
+    d=parse("<meta http-equiv=refresh content='5'>");CHECK(browser_meta_refresh(d,10,url,sizeof(url))==0);drop(d);
+    d=parse("<meta http-equiv=refresh content='2,url=other.html'>");CHECK(browser_meta_refresh(d,10,url,sizeof(url))==1&&!strcmp(url,"https://example.org/path/other.html"));drop(d);
+    d=parse("<noscript><meta http-equiv=refresh content='0;url=/nojs'></noscript>");d->scripting=1;CHECK(browser_meta_refresh(d,10,url,sizeof(url))==0);d->scripting=0;CHECK(browser_meta_refresh(d,10,url,sizeof(url))==1);drop(d);
+    /* A cookie notice whose button runs a script: the scripts stay, the
+       button is marked, and a click sets the cookie and removes the notice. */
+    jar[0]=0;
+    d=parse("<div id=banner class=cookie-banner><p>We use cookies.</p><button id=accept type=button>Accept all</button><button id=more type=button>Settings</button></div><p id=article>Article</p>"
+            "<script>document.getElementById('accept').addEventListener('click',()=>{document.cookie='consent=yes; path=/';document.getElementById('banner').remove();});</script>");
+    run(d);CHECK(d->script!=NULL);CHECK(marked(d->dom,"accept")&&!marked(d->dom,"more")&&!marked(d->dom,"banner")&&!marked(d->dom,"article"));
+    browser_dom *changed;browser_redirect to;
+    CHECK(click(d,"more",NULL,&changed,&to)==0&&!changed&&!to.url[0]);     /* nothing to do */
+    CHECK(click(d,"accept",NULL,&changed,&to)==0&&changed&&!to.url[0]);
+    CHECK(changed&&node_of(changed,"banner")<0&&node_of(changed,"article")==node_of(d->dom,"article")&&has_text(changed,"Article"));
+    CHECK(!strcmp(jar,"consent=yes"));CHECK(d->script!=NULL);
+    drop_dom(changed);drop(d);
+    /* Clicks handled for a whole part of the page: its buttons and button
+       links are marked, not the part, nor what can't be clicked. */
+    d=parse("<div id=root><div class=modal id=modal><span id=close role=button>x</span><a id=ok href='#'>OK</a><a id=real href='/terms'>Terms</a><p id=text>Text</p><b id=card>card</b></div></div>"
+            "<script>document.getElementById('root').addEventListener('click',e=>{const b=e.target.closest('[role=button],a[href=\"#\"]');if(b){e.preventDefault();b.closest('.modal').hidden=true;}});"
+            "document.getElementById('card').onclick=()=>{document.getElementById('text').textContent='card clicked';};</script>");
+    run(d);
+    CHECK(marked(d->dom,"close")&&marked(d->dom,"ok")&&marked(d->dom,"card")&&!marked(d->dom,"root")&&!marked(d->dom,"modal")&&!marked(d->dom,"real")&&!marked(d->dom,"text"));
+    CHECK(click(d,"ok",NULL,&changed,&to)==0&&changed&&!to.url[0]);
+    {int hidden=0;for(int i=0;changed&&i<changed->count;i++)if(!strcmp(dom_attr(&changed->nodes[i],"id"),"modal"))for(int k=0;k<changed->nodes[i].attribute_count;k++)hidden|=!strcmp(changed->nodes[i].attributes[k].name,"hidden");CHECK(hidden);}
+    drop_dom(changed);
+    CHECK(click(d,"card",NULL,&changed,&to)==0&&changed&&has_text(changed,"card clicked"));drop_dom(changed);
+    drop(d);
+    /* inline handlers; returning false keeps a link from being followed */
+    d=parse("<p id=t>before</p><a id=a href='/go' onclick=\"document.getElementById('t').textContent='inline '+(this.id)+' '+event.type;return false;\">Go</a><a id=b href='/accept' onclick=\"document.cookie='c=1'\">Accept</a><a id=c href=\"javascript:document.getElementById('t').textContent='js url'\">JS</a>");
+    run(d);   /* no <script>: nothing runs, nothing stays */
+    CHECK(!d->script);drop(d);
+    d=parse("<p id=t>before</p><a id=a href='/go' onclick=\"document.getElementById('t').textContent='inline '+(this.id)+' '+event.type;return false;\">Go</a><a id=b href='/accept' onclick=\"document.cookie='c=1'\">Accept</a><a id=c href=\"javascript:document.getElementById('t').textContent='js url'\">JS</a><script>window.x=1;document.body.addEventListener('mousedown',()=>{});</script>");
+    jar[0]=0;run(d);CHECK(d->script&&marked(d->dom,"a")&&marked(d->dom,"b")&&marked(d->dom,"c"));
+    CHECK(click(d,"a",NULL,&changed,&to)==0&&changed&&has_text(changed,"inline a click")&&!to.url[0]);drop_dom(changed);
+    CHECK(click(d,"b",NULL,&changed,&to)==0&&!changed&&!strcmp(to.url,"https://example.org/accept")&&!to.replace&&!strcmp(jar,"c=1"));
+    drop(d);
+    d=parse("<p id=t>before</p><a id=c href=\"javascript:document.getElementById('t').textContent='js url'\">JS</a><script>document.addEventListener('click',()=>{});</script>");
+    run(d);CHECK(click(d,"c",NULL,&changed,&to)==0&&changed&&has_text(changed,"js url"));drop_dom(changed);drop(d);
+    /* A submit button of a form whose submission a script watches: the
+       click submits the form, with the button's name and value. */
+    d=parse("<form id=f action=/save method=post><input type=hidden name=x value=1><button id=yes name=b value=accept>Accept</button><button id=no name=b value=reject>Reject</button></form><p id=log></p>"
+            "<script>let n=0;document.getElementById('f').addEventListener('submit',e=>{n++;document.getElementById('log').textContent='submitted '+n+' by '+e.submitter.id;});</script>");
+    run(d);CHECK(marked(d->dom,"f"));
+    CHECK(click(d,"no",NULL,&changed,&to)==0&&!strcmp(to.url,"https://example.org/save")&&to.post&&!strcmp(to.post,"x=1&b=reject"));
+    free(to.post);drop_dom(changed);drop(d);
+    /* What was typed in the page's fields reaches its scripts first, with
+       input and change events. */
+    d=parse("<input id=q name=q value=old><input id=box type=checkbox><select id=s><option>a<option>b<option>c</select><button id=go type=button>Go</button><p id=out></p>"
+            "<script>let changes=0;for(const id of ['q','box','s'])document.getElementById(id).addEventListener('change',()=>changes++);"
+            "document.getElementById('go').addEventListener('click',()=>{const s=document.getElementById('s');document.getElementById('out').textContent=[document.getElementById('q').value,document.getElementById('box').checked,s.querySelectorAll('option')[2].hasAttribute('selected'),changes].join('|');});</script>");
+    run(d);
+    char values[256];snprintf(values,sizeof(values),"[[%d,\"new \\\"text\\\"\",null,null],[%d,null,true,null],[%d,null,null,2]]",node_of(d->dom,"q"),node_of(d->dom,"box"),node_of(d->dom,"s"));
+    CHECK(click(d,"go",values,&changed,&to)==0&&changed&&has_text(changed,"new \"text\"|true|true|3"));
+    if(changed&&!has_text(changed,"new \"text\"|true|true|3"))for(int i=0;i<changed->count;i++)if(changed->nodes[i].text)fprintf(stderr,"text: %s\n",changed->nodes[i].text);
+    drop_dom(changed);
+    /* the same values again fire no events */
+    CHECK(click(d,"go",values,&changed,&to)==0&&changed&&has_text(changed,"new \"text\"|true|true|3"));drop_dom(changed);
+    drop(d);
+    /* a click whose timers do the work; a click that reloads the page */
+    d=parse("<div id=n class=notice>Notice <button id=x type=button>Close</button></div><script>document.getElementById('x').onclick=()=>setTimeout(()=>setTimeout(()=>document.getElementById('n').remove(),300),10);</script>");
+    run(d);CHECK(click(d,"x",NULL,&changed,&to)==0&&changed&&node_of(changed,"n")<0);drop_dom(changed);drop(d);
+    d=parse("<button id=r type=button onclick='document.cookie=\"ok=1\";location.reload()'>Agree</button><script>1</script>");
+    run(d);CHECK(click(d,"r",NULL,&changed,&to)==0&&!changed&&!strcmp(to.url,"https://example.org/path/page")&&to.replace);drop(d);
+    /* a script's click on a checkbox checks it, and tells the page */
+    d=parse("<input type=checkbox id=a><input type=radio name=g id=r1 checked><input type=radio name=g id=r2><button id=all type=button>All</button><p id=out></p>"
+            "<script>let seen=[];document.getElementById('a').addEventListener('change',e=>seen.push('a '+e.target.checked));document.getElementById('all').addEventListener('click',()=>{document.getElementById('a').click();document.getElementById('r2').click();document.getElementById('out').textContent=seen.join(',')+'|'+document.getElementById('r1').checked+'|'+document.getElementById('r2').checked;});</script>");
+    run(d);CHECK(click(d,"all",NULL,&changed,&to)==0&&changed&&has_text(changed,"a true|false|true"));drop_dom(changed);drop(d);
+    /* Scripts that don't handle clicks don't stay; nor do ones over the memory allowed. */
+    d=parse("<p id=x>x</p><script>document.getElementById('x').textContent='changed';</script>");run(d);CHECK(!d->script&&strstr(d->text,"changed"));drop(d);
+    browser_script_setup("TestAgent/1.0",jar_get,jar_set,1);
+    d=parse("<button id=b type=button onclick='this.remove()'>B</button><script>1</script>");run(d);CHECK(!d->script&&!marked(d->dom,"b"));
+    CHECK(click(d,"b",NULL,&changed,&to)<0&&!changed);drop(d);
+    browser_script_setup("TestAgent/1.0",NULL,NULL,4*1024*1024);
+    /* without cookies: none to read, and setting one does nothing */
+    d=parse("<p id=out></p><script>document.cookie='z=1';document.getElementById('out').textContent='['+document.cookie+'] '+navigator.cookieEnabled;</script>");run(d);CHECK(strstr(d->text,"[] false"));drop(d);
+    /* a click that loops forever stops; the scripts are gone after */
+    d=parse("<button id=b type=button onclick='for(;;);'>Hang</button><script>1</script>");run(d);
+    {char err[256];CHECK(browser_script_click(d,node_of(d->dom,"b"),NULL,NULL,NULL,NULL,NULL,50,&changed,&to,err,sizeof(err))<0&&!d->script&&!changed);}
+    drop(d);
+    /* scripts that may run: inline ones, the page's own site's */
+    d=parse("<script src='https://cdn.example/app.js'></script><script type=application/ld+json>{}</script><noscript>Turn on JavaScript</noscript>");
+    CHECK(!browser_scripts_present(d));drop(d);
+    d=parse("<script src='/app.js'></script>");CHECK(browser_scripts_present(d));drop(d);
+    d=parse("<script>var a;</script>");CHECK(browser_scripts_present(d));drop(d);
+    browser_script_setup(NULL,NULL,NULL,0);
+}
+int main(void){modern();mutation();fetching();modules();limits();styling();streaming();spans();layout();scripts_fit();dom_size();media();selectors();compacting();implied();script_dom();browser_side();printf("engine: %d checks, %d failures\n",checks,failures);return failures?1:0;}

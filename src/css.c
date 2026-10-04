@@ -315,6 +315,38 @@ struct css_features { unsigned *keys; int count, nodes; unsigned *tag, *id, *cla
 static unsigned feature(unsigned kind,unsigned h){return (h&~3u)|kind;}
 static int compare_keys(const void *a,const void *b){unsigned x=*(const unsigned *)a,y=*(const unsigned *)b;return x<y?-1:x>y;}
 static void features_free(css_features *f);
+/* The words in the strings of the page's scripts, as classes and ids: the
+   ones they may give elements later ("is-open", "banner--hidden"), so the
+   rules for them are kept. 0, or -1 without the memory. */
+static int script_words(const browser_dom *dom,css_features *f,int *capacity)
+{
+    int added=0;
+    for(int i=0;i<dom->count&&added<20000;i++){
+        const dom_node *n=&dom->nodes[i];
+        if(strcmp(n->tag,"script")||!n->text)continue;
+        for(const char *p=n->text;*p&&added<20000;){
+            char quote=*p++;
+            if(quote!='"'&&quote!='\''&&quote!='`')continue;
+            const char *end=p;
+            while(*end&&*end!=quote&&*end!='\n'){if(*end=='\\'&&end[1])end++;end++;}
+            for(const char *w=p;w<end;){
+                if(!isalnum((unsigned char)*w)&&*w!='_'&&*w!='-'){w++;continue;}
+                const char *start=w;while(w<end&&(isalnum((unsigned char)*w)||*w=='_'||*w=='-'))w++;
+                size_t length=(size_t)(w-start);
+                if(length<2||length>48||isdigit((unsigned char)*start))continue;
+                if(f->count+2>*capacity){
+                    int grown_capacity=*capacity*2+64;
+                    unsigned *grown=realloc(f->keys,(size_t)grown_capacity*sizeof(unsigned));if(!grown)return -1;
+                    f->keys=grown;*capacity=grown_capacity;
+                }
+                unsigned h=hash(start,length,0);
+                f->keys[f->count++]=feature(KEY_CLASS,h);f->keys[f->count++]=feature(KEY_ID,h);added++;
+            }
+            p=*end?end+1:end;
+        }
+    }
+    return 0;
+}
 static css_features *features_build(const browser_dom *dom,int per_node)
 {
     css_features *f=calloc(1,sizeof(*f));if(!f)return NULL;
@@ -348,6 +380,8 @@ static css_features *features_build(const browser_dom *dom,int per_node)
             f->class_count[i]=(unsigned char)(k-first_class);
         }
     }
+    /* compacting: what the page's scripts may add too */
+    if(!per_node&&script_words(dom,f,&capacity)<0){features_free(f);return NULL;}
     qsort(f->keys,(size_t)f->count,sizeof(unsigned),compare_keys);
     int unique=0;for(int i=0;i<f->count;i++)if(!unique||f->keys[unique-1]!=f->keys[i])f->keys[unique++]=f->keys[i];
     f->count=unique;
@@ -929,15 +963,23 @@ static void compact_property(walker *w,const char *name,size_t name_length,const
     size_t mark=c->used;
     if(append(c,"@property ",10)<0||append(c,name,name_length)<0||append(c,"{",1)<0||append(c,body,body_length)<0||append(c,"}\n",2)<0){c->used=mark;if(c->out)c->out[mark]=0;}
 }
-char *css_compact(const char *text,size_t length,const browser_dom *dom,size_t *out_length)
+css_features *css_page_features(const browser_dom *dom){return dom?features_build(dom,0):NULL;}
+void css_features_free(css_features *f){features_free(f);}
+char *css_compact_for(const char *text,size_t length,css_features *features,size_t *out_length)
 {
     compact_walker c;memset(&c,0,sizeof(c));c.base.rule=compact_rule;c.base.property=compact_property;
-    c.features=dom?features_build(dom,0):NULL;
+    c.features=features;
     walk(&c.base,text,length,0);
-    features_free(c.features);
     if(c.failed){free(c.out);return NULL;}
     if(!c.out&&!(c.out=calloc(1,1)))return NULL;
     *out_length=c.used;return c.out;
+}
+char *css_compact(const char *text,size_t length,const browser_dom *dom,size_t *out_length)
+{
+    css_features *f=css_page_features(dom);
+    char *out=css_compact_for(text,length,f,out_length);
+    features_free(f);
+    return out;
 }
 
 /* ---- values ---- */

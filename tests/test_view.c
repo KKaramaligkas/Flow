@@ -742,9 +742,113 @@ static void pictures(void)
     drop(p);
 }
 
+/* What a click runs: the page's scripts (marked data-flow-click by them),
+   or the close of a consent notice whose buttons do nothing else. */
+static int link_at(const browser_view *v, const char *text)
+{
+    const view_item *it = find_text(v, text);
+    return it ? it->link : -1;
+}
+static int control_named(const browser_view *v, const char *label)
+{
+    for (int i = 0; i < v->control_count; i++) if (!strcmp(view_string(v, v->controls[i].label), label)) return i;
+    return -1;
+}
+static int source_of(const page *p, const char *id)
+{
+    for (int i = 0; i < p->doc.dom->count; i++) if (!strcmp(dom_attr(&p->doc.dom->nodes[i], "id"), id)) return p->doc.dom->nodes[i].source_id;
+    return -1;
+}
+static void clicks(void)
+{
+    page *p = load("<p><a href=/plain>plain</a> <a id=s href=/scripted data-flow-click>scripted link</a> <span id=t data-flow-click>tap here</span> "
+                   "<span>not clickable</span> <span id=icon data-flow-click aria-label='Close menu'></span></p>"
+                   "<form id=f data-flow-click action=/save><input name=q><button id=go>Send</button><button id=b type=button data-flow-click>Run</button><button id=dead type=button>Dead</button></form>"
+                   "<form action=/other><button>Other</button></form>", "https://example.org/", 1);
+    browser_view *v = &p->view;
+    sane(v);
+    int plain = link_at(v, "plain"), scripted = link_at(v, "scripted link"), tap = link_at(v, "tap here");
+    CHECK(plain >= 0 && v->links[plain].node < 0 && v->links[plain].dismiss < 0 && !strcmp(view_string(v, v->links[plain].url), "https://example.org/plain"));
+    CHECK(scripted >= 0 && v->links[scripted].node == source_of(p, "s") && !strcmp(view_string(v, v->links[scripted].url), "https://example.org/scripted"));
+    CHECK(tap >= 0 && v->links[tap].node == source_of(p, "t") && v->links[tap].url < 0);
+    CHECK(link_at(v, "not clickable") < 0);
+    CHECK(link_at(v, "Close menu") >= 0);      /* shown by its name */
+    int go = control_named(v, "Send"), run = control_named(v, "Run"), dead = control_named(v, "Dead"), other = control_named(v, "Other");
+    CHECK(go >= 0 && v->controls[go].scripted && v->controls[go].node == source_of(p, "go"));     /* its form's submission */
+    CHECK(run >= 0 && v->controls[run].scripted && dead >= 0 && !v->controls[dead].scripted && other >= 0 && !v->controls[other].scripted);
+    CHECK(v->controls[go].dismiss < 0);
+    drop(p);
+    /* A consent notice: its buttons and buttonlike links close it when
+       nothing else happens; real links stay links. */
+    p = load("<div id=cookie-banner class='notice'><p>We use cookies.</p><a href='#' id=ok>OK</a> <a href='/privacy'>Privacy policy</a> "
+             "<span role=button>Reject</span> <div class='btn-accept'>Accept all</div> <button type=button>Settings</button></div>"
+             "<div class=recipe-cookie-list><a href='#'>Top</a></div><p>Article</p>", "https://example.org/", 1);
+    v = &p->view;
+    sane(v);
+    int notice = source_of(p, "cookie-banner"), ok = link_at(v, "OK"), privacy = link_at(v, "Privacy policy"), reject = link_at(v, "Reject"), accept = link_at(v, "Accept all"), settings = control_named(v, "Settings");
+    CHECK(notice >= 0 && ok >= 0 && v->links[ok].dismiss == notice && v->links[ok].url < 0 && v->links[ok].node < 0);
+    CHECK(privacy >= 0 && !strcmp(view_string(v, v->links[privacy].url), "https://example.org/privacy"));
+    CHECK(reject >= 0 && v->links[reject].dismiss == notice && accept >= 0 && v->links[accept].dismiss == notice);
+    CHECK(settings >= 0 && v->controls[settings].dismiss == notice);
+    int top = link_at(v, "Top");     /* not a notice: the link to the page's top stays */
+    CHECK(top >= 0 && v->links[top].dismiss < 0 && v->links[top].url >= 0);
+    /* closed, the notice is gone the next time the page is laid out */
+    p->doc.hidden[p->doc.hidden_count++] = notice;
+    browser_view_free(v);
+    char err[256];
+    CHECK(browser_view_build(v, &p->doc, VIEW_WIDTH, measure, err, sizeof(err)) == 0);
+    CHECK(!find_text(v, "We use cookies") && find_text(v, "Article"));
+    settings = control_named(v, "Settings");
+    CHECK(settings < 0 || v->controls[settings].item < 0);     /* a field of the page, not shown */
+    drop(p);
+    /* names consent tools give their notices; not just any "cookie" */
+    const char *names[] = {"<div id=onetrust-banner-sdk>", "<div class='qc-cmp2-container'>", "<div id=CybotCookiebotDialog>", "<div class=cc-window>",
+                           "<section aria-label='Cookie banner'>", "<div class='cookie_notice'>", "<div id=gdpr-popup>", "<div class=privacy-wall>"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
+        char html[256];
+        snprintf(html, sizeof(html), "%s<span role=button>Agree</span></div>", names[i]);
+        p = load(html, "https://example.org/", 1);
+        int agree = link_at(&p->view, "Agree");
+        CHECK(agree >= 0 && p->view.links[agree].dismiss >= 0);
+        drop(p);
+    }
+    /* a dialog about cookies, whatever its names */
+    p = load("<div id=dlg class=dbsFrd role=dialog aria-modal=true><h1>Before you continue</h1><div><p>We use <b>cookies</b> and data.</p></div>"
+             "<button class=tHlp8d id=L2AGLb>Accept all</button></div><div role=dialog><p>Newsletter</p><button>Close</button></div>", "https://example.org/", 1);
+    int accept_all = control_named(&p->view, "Accept all"), close = control_named(&p->view, "Close");
+    CHECK(accept_all >= 0 && p->view.controls[accept_all].dismiss == source_of(p, "dlg"));
+    CHECK(close >= 0 && p->view.controls[close].dismiss < 0);
+    drop(p);
+    const char *not_notices[] = {"<div class=cookie-recipe>", "<div class=privacy-policy>", "<body class=cookie-consent-open><div>"};
+    for (size_t i = 0; i < sizeof(not_notices) / sizeof(*not_notices); i++) {
+        char html[256];
+        snprintf(html, sizeof(html), "%s<span role=button>Agree</span></div>", not_notices[i]);
+        p = load(html, "https://example.org/", 1);
+        CHECK(link_at(&p->view, "Agree") < 0);
+        drop(p);
+    }
+    /* an open dialog shows; a closed one doesn't */
+    p = load("<dialog open><p>Open dialog</p></dialog><dialog><p>Closed dialog</p></dialog>", "https://example.org/", 1);
+    CHECK(find_text(&p->view, "Open dialog") && !find_text(&p->view, "Closed dialog"));
+    drop(p);
+    /* what the user changed, for the page's scripts */
+    p = load("<input id=a name=a value=x><input id=b type=checkbox><select id=s><option>1<option>2</select><textarea id=t>keep</textarea>", "https://example.org/", 0);
+    v = &p->view;
+    CHECK(!browser_view_values(v));
+    CHECK(browser_view_set_value(v, 0, "say \"hi\"\n\\") == 0);
+    browser_view_toggle(v, 1);
+    v->controls[2].selected = 1;
+    char *values = browser_view_values(v), want[256];
+    snprintf(want, sizeof(want), "[[%d,\"say \\\"hi\\\"\\u000a\\\\\",null,null],[%d,null,true,null],[%d,null,null,1]]", source_of(p, "a"), source_of(p, "b"), source_of(p, "s"));
+    CHECK(values && !strcmp(values, want));
+    if (values && strcmp(values, want)) fprintf(stderr, "values: %s\n want: %s\n", values, want);
+    free(values);
+    drop(p);
+}
+
 int main(void)
 {
-    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability(); flex_and_grid(); floats(); layout_limits(); pictures();
+    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability(); flex_and_grid(); floats(); layout_limits(); pictures(); clicks();
     printf("view: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

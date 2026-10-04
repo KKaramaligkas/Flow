@@ -13,7 +13,11 @@ int browser_history_commit(browser_history *h, int navigation, const char *url)
         h->current--;
     } else if (navigation == NAV_RELOAD) {
         if (!h->count) return -1;
-    } else if (navigation == NAV_NEW) {
+    } else if (navigation == NAV_SCRIPT) {
+        return h->count && !strcmp(h->visits[h->current].url, validated) ? 0 : -1;
+    } else if (navigation == NAV_REPLACE && h->count) {
+        h->visits[h->current].scroll = 0;
+    } else if (navigation == NAV_NEW || navigation == NAV_REPLACE) {
         if (h->count && !strcmp(h->visits[h->current].url, validated)) return 0;
         h->count = h->count ? h->current + 1 : 0;
         if (h->count == BROWSER_HISTORY_MAX) {

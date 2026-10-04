@@ -4,6 +4,11 @@
 #include "document.h"
 #define BROWSER_JOB_PAGE 1
 #define BROWSER_JOB_DOWNLOAD 2
+/* A click the page's scripts handle. The page shown is left as it was: the
+   job ends with a copy of it as the scripts left it (`page`, navigation
+   NAV_SCRIPT), with nothing (`unchanged`), or, when they sent the browser
+   to another page, as a BROWSER_JOB_PAGE loading that. */
+#define BROWSER_JOB_CLICK 3
 
 typedef struct {
     volatile int running, finished, cancel, result;
@@ -12,6 +17,11 @@ typedef struct {
     char *post;                 /* form data sent by POST, NULL for GET */
     volatile int64_t done, total;
     browser_document *page;
+    /* a click: on the page shown, the element's source_id, and what the
+       user typed (browser_view_values()) */
+    browser_document *target;
+    int node, unchanged;
+    char *values;
 } browser_job;
 extern browser_job browser_work;
 int browser_jobs_start(const char *cache);
@@ -21,6 +31,12 @@ int browser_jobs_busy(void);
 void browser_build_view(browser_document *doc);
 /* `post`: form data (application/x-www-form-urlencoded) to send by POST, or NULL. */
 int browser_jobs_submit(int type, int navigation, const char *url, const char *destination,int javascript,const char *post);
+/* A click on element `node` (a source_id) of `doc`, the page shown, whose
+   scripts handle it; `values`: browser_view_values() or NULL. The shown
+   page's scripts are the worker's until the job has finished. */
+int browser_jobs_click(browser_document *doc, int node, const char *values, int javascript);
+/* PSP-2000 and later: twice the memory. */
+int browser_jobs_roomy(void);
 
 /* The pictures of the page shown load between jobs, nearest to the screen
    first, and the page is laid out again as their sizes arrive. These are
@@ -42,4 +58,7 @@ void browser_pictures_viewport(int top, int bottom);
 struct browser_view *browser_pictures_view(browser_document *doc);
 /* Drops a view not taken yet: call before freeing the page it's for. */
 void browser_pictures_forget(void);
+/* Lays the page shown out again soon (it closed a notice): the view comes
+   from browser_pictures_view(). */
+void browser_relayout(void);
 #endif

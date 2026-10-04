@@ -9,12 +9,16 @@
 #include "fs.h"
 #include "picture.h"
 #include "script.h"
+#include "session.h"
 #include "view.h"
 #include "text.h"
 
 #define BARRIER() __asm__ __volatile__("" ::: "memory")
 #define PICTURE_RESERVE (3*1024*1024)   /* memory a picture leaves for the rest of the browser */
 #define SCREEN_ROWS 238
+#define REDIRECTS_MAX 5                 /* pages sending the browser on, as they load */
+#define REFRESH_SECONDS 10              /* a <meta> refresh followed */
+#define CLICK_BUDGET_MS 10000
 
 browser_job browser_work;
 static SceUID thread=-1, wake=-1;
@@ -30,6 +34,8 @@ static browser_view *volatile picture_view;
 static browser_document *volatile picture_view_page;
 static unsigned last_layout, layout_cost;
 static int near_learned;        /* a size came for a picture near the screen since the last layout */
+static volatile int relayout_wanted;
+static int roomy;
 static int progress(void *ud, int64_t done, int64_t total)
 {
     (void)ud; browser_work.done=done; browser_work.total=total;
@@ -42,7 +48,8 @@ static float measure(const char *s,int len,float scale,int flags) { return text_
 void browser_build_view(browser_document *doc)
 {
     char err[256];
-    if(!doc->pictures&&doc->dom&&doc->dom->count>0) doc->pictures=picture_table_new(picture_budget,doc->dom->count);
+    /* by source_id, which stays the same for an element when scripts change the page */
+    if(!doc->pictures&&doc->dom&&doc->dom->count>0) doc->pictures=picture_table_new(picture_budget,DOM_NODES_MAX);
     browser_view *view=calloc(1,sizeof(*view));
     if(!view) return;
     if(browser_view_build(view,doc,VIEW_WIDTH,measure,err,sizeof(err))<0) { free(view); return; }
@@ -153,6 +160,11 @@ static int pictures_step(void)
     unsigned now=sceKernelGetSystemTimeLow();
     if(picture_doc!=doc) { picture_doc=doc; last_layout=now; near_learned=0; }
     picture_table *t=doc->pictures;
+    if(relayout_wanted&&!picture_view) {
+        relayout_wanted=0; relayout(doc);
+        BARRIER(); picture_busy=0;
+        return 1;
+    }
     int top=view_top,bottom=view_bottom,did=0,i=picture_next(t,top,bottom),learned=t->learned;
     if(i>=0) {
         load_picture(t,i); did=1;
@@ -197,6 +209,7 @@ void browser_pictures_release(browser_document *doc)
     }
 }
 void browser_pictures_viewport(int top,int bottom) { view_top=top; view_bottom=bottom; }
+void browser_relayout(void) { relayout_wanted=1; if(wake>=0) sceKernelSignalSema(wake,1); }
 browser_view *browser_pictures_view(browser_document *doc)
 {
     browser_view *v=picture_view;
@@ -213,6 +226,127 @@ void browser_pictures_forget(void)
     if(v) { browser_view_free(v); free(v); }
 }
 
+/* ---- pages ---- */
+
+/* Whether `target` is `page` itself, or with `fragment_only` a part of it
+   (an address with a #fragment): nothing to load. */
+static int same_page(const char *page,const char *target,int fragment_only)
+{
+    size_t n=strcspn(page,"#"),m=strcspn(target,"#");
+    return n==m&&!strncmp(page,target,n)&&(!fragment_only||target[m]=='#');
+}
+/* Downloads a page (POST with `post`), reads it, runs its scripts and lays
+   it out, unless it sends the browser on (doc->redirect): NULL when that
+   fails, with the reason in browser_work.error. */
+static browser_document *load_page(const char *url,const char *post)
+{
+    net_response response;
+    browser_document *doc=NULL;
+#ifdef PM_AUTOTEST
+    phase_start=sceKernelGetSystemTimeLow();
+#endif
+    int length=post?
+        net_post_file(url,post,page_cache,BROWSER_PAGE_MAX,&response,progress,NULL,browser_work.error,sizeof(browser_work.error)):
+        net_get_file(url,page_cache,BROWSER_PAGE_MAX,&response,progress,NULL,browser_work.error,sizeof(browser_work.error));
+    phase("download");
+    if(length>=0 && !cancelled(NULL)) {
+        fs_file f=fs_open(page_cache,FS_READ);
+        doc=calloc(1,sizeof(*doc));
+        if(!doc) snprintf(browser_work.error,sizeof(browser_work.error),"Not enough memory to open the page.");
+        else if(f<0 || browser_document_load(doc,read_page,&f,response.url,response.content_type,cancelled,NULL,
+                                          browser_work.error,sizeof(browser_work.error))<0) {
+            browser_document_free(doc); free(doc); doc=NULL;
+        }
+        if(f>=0)fs_close(f);
+        phase("parse");
+        if(doc) {
+            doc->source_bytes=(size_t)length;
+            doc->scripting=browser_work.javascript&&browser_scripts_present(doc);
+            browser_assets(doc,doc->scripting,fetch_asset,NULL,cancelled,NULL);
+            phase("assets");
+            /* Scripts first: a page they change is styled once, by them. */
+            if(doc->scripting) {
+                browser_script_run(doc,fetch_same_origin,doc,cancelled,NULL,30000,browser_work.error,sizeof(browser_work.error));
+                if(!doc->scripts_run) doc->scripting=0;     /* none could run: as without JavaScript */
+            }
+            phase("scripts");
+            if(doc->rendered!=doc->dom&&browser_document_render(doc,browser_work.error,sizeof(browser_work.error))<0) {
+                browser_document_free(doc); free(doc); doc=NULL;
+            } else {
+                phase("render");
+                /* where it sends the browser on to: not to a #fragment of
+                   itself, and a refresh of itself isn't followed */
+                browser_redirect *r=&doc->redirect;
+                if(r->url[0]&&!r->post&&same_page(doc->url,r->url,1)) r->url[0]=0;
+                if(!r->url[0]&&browser_meta_refresh(doc,REFRESH_SECONDS,r->url,sizeof(r->url))&&same_page(doc->url,r->url,0)) r->url[0]=0;
+                if(!cancelled(NULL)&&!r->url[0]) browser_build_view(doc);
+                phase("view");
+            }
+        }
+    }
+    fs_remove(page_cache);
+    return doc;
+}
+/* browser_work.url, and the pages it sends the browser on to as they load:
+   their scripts' navigation and <meta> refreshes. */
+static void page_job(void)
+{
+    char url[BROWSER_URL_MAX];
+    pm_strlcpy(url,browser_work.url,sizeof(url));
+    char *post=browser_work.post; browser_work.post=NULL;
+    browser_document *doc=NULL;
+    for(int hop=0;;hop++) {
+        doc=load_page(url,post);
+        free(post); post=NULL;
+        if(!doc||cancelled(NULL)) break;
+        browser_redirect *r=&doc->redirect;
+        if(!r->url[0]) break;
+        if(hop==REDIRECTS_MAX) { r->url[0]=0; free(r->post); r->post=NULL; browser_build_view(doc); break; }
+        pm_strlcpy(url,r->url,sizeof(url)); pm_strlcpy(browser_work.url,url,sizeof(browser_work.url));
+        post=r->post; r->post=NULL;
+        browser_document_free(doc); free(doc); doc=NULL;
+    }
+    free(post);
+    if(doc) { browser_work.page=doc; browser_work.result=0; }
+}
+/* An element of the page shown whose scripts handle clicks: what they do
+   with it. The page itself isn't changed: the main thread shows it meanwhile. */
+static void click_job(void)
+{
+    browser_document *doc=browser_work.target;
+    browser_dom *changed=NULL; browser_redirect to;
+    if(browser_script_click(doc,browser_work.node,browser_work.values,fetch_same_origin,doc,cancelled,NULL,CLICK_BUDGET_MS,
+                            &changed,&to,browser_work.error,sizeof(browser_work.error))<0) return;
+    if(to.url[0]&&!to.post&&same_page(doc->url,to.url,1)) to.url[0]=0;
+    if(to.url[0]) {
+        /* to another page: this one's scripts are done, and their memory is the next page's */
+        browser_script_free(doc);
+        pm_strlcpy(browser_work.url,to.url,sizeof(browser_work.url));
+        browser_work.post=to.post; browser_work.navigation=to.replace?NAV_REPLACE:NAV_NEW;
+        BARRIER();
+        browser_work.type=BROWSER_JOB_PAGE;
+        if(changed) { dom_free(changed); free(changed); }
+        page_job();
+        return;
+    }
+    free(to.post);
+    if(!changed) { browser_work.unchanged=1; browser_work.result=0; return; }
+    /* the page as the scripts left it, laid out with the shown page's pictures */
+    browser_document *next=calloc(1,sizeof(*next));
+    if(!next) { dom_free(changed); free(changed); snprintf(browser_work.error,sizeof(browser_work.error),"Not enough memory for the page's change."); return; }
+    strcpy(next->url,doc->url);
+    next->dom=changed; next->scripting=doc->scripting; next->source_bytes=doc->source_bytes;
+    next->scripts_run=doc->scripts_run; next->assets_omitted=doc->assets_omitted;
+    for(int i=0;i<doc->hidden_count;i++) next->hidden[i]=doc->hidden[i];
+    next->hidden_count=doc->hidden_count;
+    if(browser_document_render(next,browser_work.error,sizeof(browser_work.error))<0) { browser_document_free(next); free(next); return; }
+    picture_table_rebind(doc->pictures,doc->dom,next->dom);
+    next->pictures=doc->pictures;
+    if(!cancelled(NULL)) browser_build_view(next);
+    next->pictures=NULL;    /* the main thread hands them over with the scripts */
+    browser_work.page=next; browser_work.navigation=NAV_SCRIPT; browser_work.result=0;
+}
+
 static int worker(SceSize args, void *argp)
 {
     (void)args; (void)argp;
@@ -227,50 +361,11 @@ static int worker(SceSize args, void *argp)
         if(browser_work.type==BROWSER_JOB_DOWNLOAD) {
             browser_work.result=net_download(browser_work.url,browser_work.destination,progress,NULL,
                                             browser_work.error,sizeof(browser_work.error));
-        } else {
-            net_response response;
-#ifdef PM_AUTOTEST
-            phase_start=sceKernelGetSystemTimeLow();
-#endif
-            int length=browser_work.post?
-                net_post_file(browser_work.url,browser_work.post,page_cache,BROWSER_PAGE_MAX,&response,progress,NULL,
-                              browser_work.error,sizeof(browser_work.error)):
-                net_get_file(browser_work.url,page_cache,BROWSER_PAGE_MAX,&response,progress,NULL,
-                             browser_work.error,sizeof(browser_work.error));
-            browser_work.result=-1;
-            phase("download");
-            if(length>=0 && !cancelled(NULL)) {
-                browser_document *doc=calloc(1,sizeof(*doc)); fs_file f=fs_open(page_cache,FS_READ);
-                if(!doc) snprintf(browser_work.error,sizeof(browser_work.error),"Not enough memory to open the page.");
-                else if(f<0 || browser_document_load(doc,read_page,&f,response.url,response.content_type,cancelled,NULL,
-                                              browser_work.error,sizeof(browser_work.error))<0) {
-                    browser_document_free(doc); free(doc); doc=NULL;
-                }
-                if(f>=0)fs_close(f);
-                phase("parse");
-                if(doc) {
-                    doc->source_bytes=(size_t)length;
-                    doc->scripting=browser_work.javascript;
-                    browser_assets(doc,browser_work.javascript,fetch_asset,NULL,cancelled,NULL);
-                    phase("assets");
-                    /* Scripts first: a page they change is styled once, by them. */
-                    if(browser_work.javascript)browser_script_run(doc,fetch_same_origin,doc,cancelled,NULL,30000,
-                                                    browser_work.error,sizeof(browser_work.error));
-                    phase("scripts");
-                    if(doc->rendered!=doc->dom&&browser_document_render(doc,browser_work.error,sizeof(browser_work.error))<0) {
-                        browser_document_free(doc);free(doc);
-                    } else {
-                        phase("render");
-                        if(!cancelled(NULL)) browser_build_view(doc);
-                        phase("view");
-                        browser_work.page=doc;browser_work.result=0;
-                    }
-                }
-            }
-            fs_remove(page_cache);
-        }
+        } else if(browser_work.type==BROWSER_JOB_CLICK) click_job();
+        else page_job();
         if(browser_work.cancel || quit) browser_work.result=-1;
         free(browser_work.post); browser_work.post=NULL;
+        free(browser_work.values); browser_work.values=NULL;
         browser_work.running=0; browser_work.finished=1;
     }
     return 0;
@@ -281,7 +376,7 @@ int browser_jobs_start(const char *cache)
     quit=0;
     /* PSP-2000 and later have twice the memory: more of it for pictures */
     void *probe=malloc(24*1024*1024);
-    picture_budget=(probe?12:4)*1024*1024;
+    picture_budget=(probe?12:4)*1024*1024; roomy=probe!=NULL;
     free(probe);
     wake=sceKernelCreateSema("flow_jobs",0,0,1,NULL);
     if(wake<0) return -1;
@@ -303,6 +398,7 @@ void browser_jobs_stop(void)
     if(browser_work.page) { browser_document_free(browser_work.page); free(browser_work.page); browser_work.page=NULL; }
 }
 int browser_jobs_busy(void) { return browser_work.running || browser_work.finished; }
+int browser_jobs_roomy(void) { return roomy; }
 int browser_jobs_submit(int type, int navigation, const char *url, const char *destination,int javascript,const char *post)
 {
     if(browser_jobs_busy() || thread<0 || strlen(url)>=sizeof(browser_work.url) ||
@@ -314,5 +410,16 @@ int browser_jobs_submit(int type, int navigation, const char *url, const char *d
     browser_work.javascript=javascript; browser_work.type=type; browser_work.navigation=navigation; browser_work.total=-1;
     strcpy(browser_work.url,url);
     if(destination) strcpy(browser_work.destination,destination);
+    browser_work.running=1; sceKernelSignalSema(wake,1); return 0;
+}
+int browser_jobs_click(browser_document *doc,int node,const char *values,int javascript)
+{
+    if(browser_jobs_busy() || thread<0 || !doc || !doc->script) return -1;
+    char *copy=NULL;
+    if(values && !(copy=strdup(values))) return -1;
+    memset(&browser_work,0,sizeof(browser_work));
+    browser_work.type=BROWSER_JOB_CLICK; browser_work.navigation=NAV_SCRIPT; browser_work.total=-1;
+    browser_work.javascript=javascript; browser_work.target=doc; browser_work.node=node; browser_work.values=copy;
+    pm_strlcpy(browser_work.url,doc->url,sizeof(browser_work.url));
     browser_work.running=1; sceKernelSignalSema(wake,1); return 0;
 }

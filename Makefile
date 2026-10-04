@@ -1,7 +1,7 @@
 TARGET = flow
 OBJS = src/main.o src/adopt.o src/jobs.o src/url.o src/document.o src/dom.o src/css.o src/script.o src/layout.o src/session.o src/view.o src/picture.o \
        vendor/quickjs/quickjs.o vendor/quickjs/cutils.o vendor/quickjs/dtoa.o vendor/quickjs/libregexp.o vendor/quickjs/libunicode.o \
-       shared/net.o shared/http_policy.o shared/transfer.o shared/tlsdiag.o shared/clock.o shared/entropy.o \
+       shared/net.o shared/jar.o shared/http_policy.o shared/transfer.o shared/tlsdiag.o shared/clock.o shared/entropy.o \
        shared/stubs.o shared/resume.o shared/fs.o shared/util.o shared/gfx.o shared/text.o shared/input.o
 INCDIR = src vendor/quickjs PluginManager/src
 CFLAGS = -O2 -G0 -Wall -Wextra -Wno-unused-parameter -std=gnu99 -DFLOW_NO_ATOMICS -D_GNU_SOURCE -DCONFIG_VERSION=\"2026-06-04\" $(EXTRA_CFLAGS)

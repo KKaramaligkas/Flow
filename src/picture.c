@@ -634,6 +634,32 @@ int picture_of(const picture_table *t, int node)
     return t && node >= 0 && node < t->nodes ? t->of_node[node] : -1;
 }
 
+static int same_source(const dom_node *a, const dom_node *b)
+{
+    static const char *names[] = {"src", "srcset", "data-src", "data-srcset", "data-lazy-src", "sizes"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) if (strcmp(dom_attr(a, names[i]), dom_attr(b, names[i]))) return 0;
+    return 1;
+}
+void picture_table_rebind(picture_table *t, const browser_dom *old, const browser_dom *dom)
+{
+    if (!t || !t->of_node || !dom) return;
+    int *at = old ? malloc((size_t)t->nodes * sizeof(int)) : NULL;
+    if (at) {
+        for (int i = 0; i < t->nodes; i++) at[i] = -1;
+        for (int i = 0; i < old->count; i++) {
+            int key = old->nodes[i].source_id;
+            if (key >= 0 && key < t->nodes) at[key] = i;
+        }
+    }
+    for (int i = 0; i < dom->count; i++) {
+        const dom_node *n = &dom->nodes[i];
+        int key = n->source_id;
+        if (key < 0 || key >= t->nodes || t->of_node[key] < 0) continue;
+        int was = at ? at[key] : -1;
+        if (was < 0 || strcmp(old->nodes[was].tag, n->tag) || !same_source(&old->nodes[was], n)) t->of_node[key] = -1;
+    }
+    free(at);
+}
 int picture_add(picture_table *t, int node, const char *url, int want_w, int want_h, int sized, int top, float density)
 {
     int index = picture_of(t, node);

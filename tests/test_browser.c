@@ -94,6 +94,15 @@ static void histories(void)
     int previous=h.current;CHECK(browser_history_commit(&h,NAV_NEW,"javascript:bad")<0);CHECK(h.current==previous&&h.count==2);
     for(int i=0;i<20;i++){char url[128];snprintf(url,sizeof(url),"https://a/%d",i);CHECK(browser_history_commit(&h,NAV_NEW,url)==0);}
     CHECK(h.count==BROWSER_HISTORY_MAX);CHECK(h.current==BROWSER_HISTORY_MAX-1);SAME(h.visits[0].url,"https://a/8");
+    /* location.replace(): the page takes the shown one's place; a page its scripts changed keeps it */
+    browser_history r={0};
+    CHECK(browser_history_commit(&r,NAV_REPLACE,"https://a/first")==0&&r.count==1);
+    CHECK(browser_history_commit(&r,NAV_NEW,"https://a/consent")==0&&r.count==2);
+    r.visits[r.current].scroll=40;
+    CHECK(browser_history_commit(&r,NAV_REPLACE,"https://a/after")==0&&r.count==2&&r.current==1&&r.visits[1].scroll==0);
+    SAME(r.visits[1].url,"https://a/after");SAME(browser_history_back(&r),"https://a/first");
+    CHECK(browser_history_commit(&r,NAV_SCRIPT,"https://a/after")==0&&r.count==2);
+    CHECK(browser_history_commit(&r,NAV_SCRIPT,"https://a/other")<0);
 }
 static void malformed(void)
 {

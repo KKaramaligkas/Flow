@@ -90,6 +90,11 @@ int css_media_matches(const char *);
 /* A stylesheet reduced to the rules that can match `dom`, with @media,
    @supports and @layer resolved: malloc'd, its length in *length. */
 char *css_compact(const char *,size_t,const browser_dom *,size_t *length);
+/* The same for several sheets of a page: what its elements and scripts
+   name, found once (NULL without the memory). */
+css_features *css_page_features(const browser_dom *);
+char *css_compact_for(const char *,size_t,css_features *,size_t *length);
+void css_features_free(css_features *);
 browser_style css_compute(const browser_css *,const browser_dom *,int,browser_style);
 /* css_compute() and the element's box in one pass over the rules. */
 browser_style css_compute_box(const browser_css *,const browser_dom *,int,browser_style,browser_box *);
