@@ -4,6 +4,7 @@
 #include <string.h>
 #include "../src/document.h"
 #include "../src/view.h"
+#include "../src/picture.h"
 static int checks, failures;
 #define CHECK(test) do{checks++;if(!(test)){failures++;fprintf(stderr,"%d: %s\n",__LINE__,#test);}}while(0)
 #define SAME(a,b) CHECK(strcmp((a),(b))==0)
@@ -413,6 +414,19 @@ static const view_item *find_rect(const browser_view *v, uint32_t color)
 
 static void flex_and_grid(void)
 {
+    /* flex: 1 shares the room equally, however long the items' words */
+    {
+        page *q = load("<style>.r{display:flex;gap:12px}.r div{flex:1;padding:8px;border:1px solid #ccc}</style>"
+                       "<div class=r><div>A</div><div>B</div><div>Card three has longer words</div></div>", "https://example.org/", 0);
+        const view_item *a = find_text(&q->view, "A"), *c = find_text(&q->view, "Card");
+        int widths[3], k = 0;
+        for (int i = 0; i < q->view.item_count && k < 3; i++)
+            if (q->view.items[i].kind == ITEM_RECT && q->view.items[i].h == 1 && q->view.items[i].w > 20 && q->view.items[i].color == 0xffcccccc &&
+                (!k || q->view.items[i].x != q->view.items[i - 1].x)) widths[k++] = q->view.items[i].w;
+        CHECK(a && c && a->y == c->y && k == 3);
+        CHECK(k == 3 && abs(widths[0] - widths[1]) <= 1 && abs(widths[1] - widths[2]) <= 1 && widths[0] > 100);
+        drop(q);
+    }
     /* a navigation bar: the links side by side */
     page *p = load("<nav style='display:flex;gap:10px'><a href=/a>Home</a><a href=/b>About</a><a href=/c>Contact</a></nav><p>after</p>",
                    "https://example.org/", 0);
@@ -601,9 +615,136 @@ static void layout_limits(void)
     free(html);
 }
 
+/* With the page's pictures on: the table the loader fills. */
+static page *load_with_pictures(const char *html)
+{
+    page *p = calloc(1, sizeof(*p));
+    char err[256];
+    CHECK(browser_document_parse(&p->doc, html, strlen(html), "https://example.org/a/", "text/html", err, sizeof(err)) == 0);
+    p->doc.pictures = picture_table_new(4 << 20, p->doc.dom->count);
+    CHECK(p->doc.pictures != NULL);
+    CHECK(browser_view_build(&p->view, &p->doc, VIEW_WIDTH, measure, err, sizeof(err)) == 0);
+    return p;
+}
+/* Laid out again, as when the loader has learned pictures' sizes. */
+static void relayout(page *p)
+{
+    char err[256];
+    browser_view_free(&p->view);
+    CHECK(browser_view_build(&p->view, &p->doc, VIEW_WIDTH, measure, err, sizeof(err)) == 0);
+}
+static int entry(const page *p, const char *url)
+{
+    const picture_table *t = p->doc.pictures;
+    for (int i = 0; i < t->count; i++) if (!strcmp(t->entries[i].url, url)) return i;
+    return -1;
+}
+/* As if the picture at https://example.org/a/<name> was loaded. */
+static void arrive(page *p, const char *name, int w, int h)
+{
+    char url[256];
+    snprintf(url, sizeof(url), "https://example.org/a/%s", name);
+    int i = entry(p, url);
+    CHECK(i >= 0);
+    if (i >= 0) { p->doc.pictures->entries[i].natural_w = w; p->doc.pictures->entries[i].natural_h = h; p->doc.pictures->entries[i].state = PICTURE_READY; }
+}
+static const view_item *picture_item(const page *p, const char *name)
+{
+    char url[256];
+    snprintf(url, sizeof(url), "https://example.org/a/%s", name);
+    int i = entry(p, url);
+    for (int k = 0; i >= 0 && k < p->view.item_count; k++)
+        if (p->view.items[k].kind == ITEM_IMAGE && p->view.items[k].flags == i + 1) return &p->view.items[k];
+    return NULL;
+}
+
+static void pictures(void)
+{
+    page *p = load_with_pictures("<p>top</p>"
+        "<img src=a.jpg width=200 height=100><img src=d.png alt='' width=100 height=50><img src=u.png><img src=v.png alt='A cat'>"
+        "<img src=t.gif width=1 height=1><img src=logo.svg alt=Logo><img src=deco.svg><img src=w.jpg width=300>"
+        "<img srcset='h.png 2x'><img src=big.jpg><img src=tall.jpg><img src='my pic \xc3\xa9.jpg' width=10 height=10>"
+        "<p><a href=/ title=Home><img src=logo.png></a> <a href=/x title=Xlink><img src=x.svg></a></p>"
+        "<div style='display:flex'><img src=f1.jpg width=100 height=100><img src=f2.jpg width=100 height=100></div>"
+        "<img src='data:image/png;base64,iVBORw0KGgo=' width=20 height=20><img src=a.jpg width=50 height=25>"
+        "<img src=px.gif><img src=icon.png width=16 height=16><div style=display:none><img src=hidden.jpg></div>");
+    browser_view *v = &p->view;
+    picture_table *t = p->doc.pictures;
+    const view_item *it0;
+    sane(v);
+    CHECK(t->count == 15);
+    CHECK(entry(p, "https://example.org/a/a.jpg") == 0 && entry(p, "https://example.org/a/d.png") == 1);
+    CHECK(entry(p, "https://example.org/a/t.gif") < 0 && entry(p, "https://example.org/a/logo.svg") < 0 && entry(p, "https://example.org/a/hidden.jpg") < 0);
+    CHECK(entry(p, "https://example.org/a/my%20pic%20%C3%A9.jpg") >= 0 && entry(p, "data:image/png;base64,iVBORw0KGgo=") >= 0);
+    /* a box the page sizes: the picture is stretched to it */
+    const view_item *a = picture_item(p, "a.jpg");
+    CHECK(a && a->w == 120 && a->h == 60);
+    CHECK(t->entries[0].sized == PICTURE_FIT_STRETCH && t->entries[0].want_w == 120 && t->entries[0].want_h == 60);
+    const view_item *d = picture_item(p, "d.png"), *icon = picture_item(p, "icon.png");
+    CHECK(d && d->w == 60 && d->h == 30 && icon && icon->w == 10);      /* decoration shows with its picture */
+    /* sized by the picture itself: nothing until its size is known, or its description */
+    int u = entry(p, "https://example.org/a/u.png");
+    CHECK(u >= 0 && !picture_item(p, "u.png") && t->entries[u].sized == PICTURE_FIT_OWN && t->entries[u].want_w == 464 && !t->entries[u].want_h);
+    const view_item *cat = picture_item(p, "v.png");
+    CHECK(cat && cat->length == 5 && cat->h == 17);
+    const view_item *w = picture_item(p, "w.jpg");
+    int wi = entry(p, "https://example.org/a/w.jpg");
+    CHECK(w && w->w == 180 && w->h == 135 && t->entries[wi].sized == PICTURE_FIT_BOX && t->entries[wi].want_w == 180 && !t->entries[wi].want_h);
+    CHECK(t->entries[entry(p, "https://example.org/a/h.png")].density == 2);
+    /* what this can't decode is shown as before */
+    int logo_box = 0;
+    for (int i = 0; i < v->item_count; i++) if (v->items[i].kind == ITEM_IMAGE && !v->items[i].flags && v->items[i].length == 4) logo_box++;
+    CHECK(logo_box == 1);
+    /* an icon link shows its name until its picture arrives, then the picture */
+    int logo = entry(p, "https://example.org/a/logo.png");
+    CHECK(find_text(v, "Home") && find_text(v, "Xlink") && logo >= 0 && t->entries[logo].relayout && !t->entries[0].relayout);
+    const view_item *f1 = picture_item(p, "f1.jpg"), *f2 = picture_item(p, "f2.jpg");
+    CHECK(f1 && f2 && f1->y == f2->y && f2->x >= f1->x + 60);
+    CHECK(t->entries[0].top < t->entries[entry(p, "https://example.org/a/f1.jpg")].top);
+    /* the sizes arrive: laid out again, with the same entries */
+    arrive(p, "u.png", 400, 200); arrive(p, "v.png", 100, 100); arrive(p, "w.jpg", 600, 300); arrive(p, "h.png", 200, 100);
+    arrive(p, "big.jpg", 2000, 1000); arrive(p, "tall.jpg", 100, 2000); arrive(p, "px.gif", 1, 1); arrive(p, "logo.png", 100, 40);
+    relayout(p);
+    v = &p->view;
+    sane(v);
+    CHECK(t->count == 15);
+    CHECK(!find_text(v, "Home") && find_text(v, "Xlink") && (it0 = picture_item(p, "logo.png")) && it0->link >= 0 && it0->w == 60 && it0->h == 24);
+    const view_item *it;
+    CHECK((it = picture_item(p, "u.png")) && it->w == 240 && it->h == 120);
+    CHECK((it = picture_item(p, "v.png")) && it->w == 60 && it->h == 60);
+    CHECK((it = picture_item(p, "w.jpg")) && it->w == 180 && it->h == 90);
+    CHECK((it = picture_item(p, "h.png")) && it->w == 60 && it->h == 30);
+    CHECK((it = picture_item(p, "big.jpg")) && it->w == 464 && it->h == 232);
+    CHECK((it = picture_item(p, "tall.jpg")) && it->w == 30 && it->h == 600);
+    CHECK(!picture_item(p, "px.gif"));
+    CHECK((it = picture_item(p, "a.jpg")) && it->w == 120);
+    drop(p);
+    /* pictures sized by a percentage shrink with flex items: the cards stay side by side */
+    p = load_with_pictures("<style>.c{display:flex;gap:8px}.c div{flex:1}.c img{width:100%;height:auto}.m img{max-width:100%}</style>"
+                           "<div class=c><div><img src=c1.jpg><p>one</p></div><div><img src=c2.jpg><p>two</p></div><div><img src=c3.jpg><p>three</p></div></div>"
+                           "<div class=c><div class=m><img src=m1.jpg><p>one</p></div><div class=m><img src=m2.jpg><p>two</p></div></div>");
+    arrive(p, "c1.jpg", 480, 320); arrive(p, "c2.jpg", 480, 320); arrive(p, "c3.jpg", 480, 320);
+    arrive(p, "m1.jpg", 1000, 500); arrive(p, "m2.jpg", 1000, 500);
+    relayout(p);
+    sane(&p->view);
+    const view_item *c1 = picture_item(p, "c1.jpg"), *c3 = picture_item(p, "c3.jpg"), *m1 = picture_item(p, "m1.jpg"), *m2 = picture_item(p, "m2.jpg");
+    CHECK(c1 && c3 && c1->y == c3->y && c1->w < 160 && c3->x > c1->x + c1->w && abs(c1->h - c1->w * 2 / 3) <= 1);
+    CHECK(m1 && m2 && m1->y == m2->y && m1->w <= 232 && abs(m1->h - m1->w / 2) <= 1);
+    drop(p);
+    /* more pictures than the table holds: the rest are shown as before */
+    char html[16384];
+    size_t used = 0;
+    for (int i = 0; i < PICTURES_MAX + 10; i++) used += (size_t)snprintf(html + used, sizeof(html) - used, "<img src=i%d.jpg alt=N width=20 height=20>", i);
+    p = load_with_pictures(html);
+    int plain = 0, shown = 0;
+    for (int i = 0; i < p->view.item_count; i++) if (p->view.items[i].kind == ITEM_IMAGE) { shown++; plain += !p->view.items[i].flags; }
+    CHECK(p->doc.pictures->count == PICTURES_MAX && shown == PICTURES_MAX + 10 && plain == 10);
+    drop(p);
+}
+
 int main(void)
 {
-    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability(); flex_and_grid(); floats(); layout_limits();
+    flow(); boxes(); tables(); forms(); navigation(); plain_text(); readability(); flex_and_grid(); floats(); layout_limits(); pictures();
     printf("view: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

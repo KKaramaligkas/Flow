@@ -26,7 +26,8 @@ typedef struct {
     uint32_t color;         /* text, fill, border or bullet color */
     int text, length;       /* ITEM_TEXT: UTF-8 bytes in view->text; ITEM_IMAGE: alt text */
     float scale;            /* text size */
-    short flags;            /* CSS_* text flags; ITEM_FRAME: border width */
+    short flags;            /* CSS_* text flags; ITEM_FRAME: border width; ITEM_IMAGE: its
+                               entry in the page's pictures + 1 (0: none) */
     unsigned char kind;
     short link, control;    /* -1 when the item isn't part of a link or form field */
 } view_item;

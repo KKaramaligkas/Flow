@@ -6,8 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "view.h"
 #include "url.h"
+#include "picture.h"
 
 #define PIECES_MAX  1024        /* pieces on the open lines */
 #define ASCENT      13.0f       /* firmware font metrics at size 1.0 */
@@ -57,6 +59,7 @@ typedef struct {
     uint32_t marker_color;
     int depth, scripting, failed;
     const char *name;           /* an icon link's name, shown in place of its content */
+    int naming;                 /* inside icon links showing their names */
     uint32_t backdrop;          /* the background drawn behind the open block (0: the paper) */
     int item_width;             /* >= 0: the next element is a flex or grid item this wide */
     int budget;                 /* elements content_widths() may still visit (0: no limit) */
@@ -624,6 +627,20 @@ static int has_attr(const dom_node *n, const char *name)
     for (int i = 0; i < n->attribute_count; i++) if (eq(n->attributes[i].name, name)) return 1;
     return 0;
 }
+/* Whether an element holds a picture that has arrived: an icon link shows
+   that rather than its name. */
+static int has_picture(builder *b, int node, int depth)
+{
+    const picture_table *t = b->doc->pictures;
+    if (!t) return 0;
+    for (int c = b->dom->nodes[node].first; c >= 0 && depth < 8; c = b->dom->nodes[c].next) {
+        const dom_node *k = &b->dom->nodes[c];
+        int i = is(k, "img") ? picture_of(t, c) : -1;
+        if (i >= 0 && t->entries[i].state == PICTURE_READY) return 1;
+        if (k->tag[0] != '#' && has_picture(b, c, depth + 1)) return 1;
+    }
+    return 0;
+}
 
 /* Every form and field in document order, before layout: hidden fields
    are submitted too, and labels can name fields that come after them. */
@@ -791,6 +808,20 @@ static void field(builder *b, int node, browser_style st, browser_box *box)
     add_box(b, first, w, h, h - 3 > 0 ? (float)(h - 3) : (float)h);
 }
 
+/* Whether an <img> shows a picture: the page's pictures are loaded, and it
+   has a source this decodes. Its own size in page pixels goes to *nw x *nh
+   once known (0 before). */
+static int image_picture(builder *b, int node, int *nw, int *nh)
+{
+    picture_table *t = b->doc->pictures;
+    size_t n;
+    float density;
+    *nw = *nh = 0;
+    if (!t || (picture_of(t, node) < 0 && (t->count >= PICTURES_MAX || !picture_source(b->dom, node, VIEW_WIDTH, &n, &density)))) return 0;
+    picture_known(t, node, nw, nh);
+    return 1;
+}
+
 /* The size of an image's box (0 when it isn't shown), fitted into `room`. */
 static int image_size(builder *b, int node, const browser_box *box, int room, int *height)
 {
@@ -798,6 +829,27 @@ static int image_size(builder *b, int node, const browser_box *box, int room, in
     const char *alt = dom_attr(n, "alt");
     int w = box->width > 0 ? box->width : box->width < 0 && room > 0 ? room * -box->width / 100 : 0;
     int h = box->height > 0 ? box->height : 0;
+    int nw, nh;
+    if (image_picture(b, node, &nw, &nh)) {
+        /* The picture's box: the page's size, or the picture's own, keeping
+           its shape. Until its size is known, a description holds its place. */
+        if (nw && nw <= 2 && nh <= 2) return 0;     /* tracking pixel */
+        if (!w && !h) {
+            if (nw) { w = nw; h = nh; }
+            else if (*alt) { w = (int)width_of(b, alt, (int)strlen(alt), 0.55f, 0) + 8; h = FIELD_H; }
+            else return 0;
+        } else if (!h) h = nw ? (int)((long long)w * nh / nw) : w * 3 / 4;
+        else if (!w) w = nw ? (int)((long long)h * nw / nh) : h;
+        if (w <= 2 && h <= 2) return 0;
+        int most = box->max_width > 0 ? box->max_width : box->max_width < 0 && room > 0 ? room * -box->max_width / 100 : 0;
+        if (most > 0 && w > most) { h = (int)((long long)h * most / w); w = most; }
+        if (room > 0 && w > room) { h = (int)((long long)h * room / w); w = room; }
+        if (h > 600) { w = (int)((long long)w * 600 / h); h = 600; }
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        *height = h;
+        return w;
+    }
     /* Without the picture, decoration is noise: alt="" marks it, and an
        icon (up to 25 CSS pixels) without a description is one. */
     if (!*alt && (has_attr(n, "alt") || (w <= 15 && h <= 15))) return 0;
@@ -815,15 +867,68 @@ static int image_size(builder *b, int node, const browser_box *box, int room, in
     return w;
 }
 
+/* The address of the picture an <img> shows in a box `width` page pixels
+   wide, as browsers send it (malloc'd), or NULL. */
+static char *picture_url(builder *b, int node, int width, float *density)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t n;
+    const char *src = picture_source(b->dom, node, width, &n, density);
+    if (!src) return NULL;
+    if (n >= 5 && !strncasecmp(src, "data:", 5)) return strndup(src, n);
+    char raw[BROWSER_URL_MAX], absolute[BROWSER_URL_MAX];
+    size_t used = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\t' || c == '\n' || c == '\r') continue;
+        int escape = c <= 32 || c >= 127 || c == '"' || c == '<' || c == '>' ||
+                     (c == '%' && !(i + 2 < n && isxdigit((unsigned char)src[i + 1]) && isxdigit((unsigned char)src[i + 2])));
+        if (used + 4 > sizeof(raw)) return NULL;
+        if (c == '\\') raw[used++] = '/';
+        else if (escape) { raw[used++] = '%'; raw[used++] = hex[c >> 4]; raw[used++] = hex[c & 15]; }
+        else raw[used++] = (char)c;
+    }
+    raw[used] = 0;
+    if (browser_url_resolve(b->base, raw, absolute, sizeof(absolute)) < 0) return NULL;
+    return strdup(absolute);
+}
+
+/* Puts the picture an <img> shows in a w x h box (0 x 0 while its size is
+   unknown) in the page's table, for the loader: its entry, or -1. */
+static int add_picture(builder *b, int node, const browser_box *box, int w, int h)
+{
+    picture_table *t = b->doc->pictures;
+    int nw, nh, given_w = box->width != 0, given_h = box->height > 0, known = picture_of(t, node);
+    if (!t || (w <= 0 && (known >= 0 || given_w || given_h)) || !image_picture(b, node, &nw, &nh)) return -1;
+    int fit = given_w && given_h ? PICTURE_FIT_STRETCH : given_w || given_h ? PICTURE_FIT_BOX : PICTURE_FIT_OWN;
+    /* the size it's decoded at: its box, or for a picture shown at its own
+       size, at most as wide as the line */
+    int want_w = fit == PICTURE_FIT_OWN ? b->line->width : given_w ? w : 0, want_h = given_h ? h : 0;
+    if (known >= 0) {
+        picture_add(t, node, t->entries[known].url, want_w, want_h, fit, *b->y, t->entries[known].density);
+        if (b->naming) t->entries[known].relayout = 1;
+        return known;
+    }
+    float density;
+    char *url = picture_url(b, node, want_w > 0 ? want_w : b->line->width, &density);
+    if (!url) return -1;
+    int index = picture_add(t, node, url, want_w, want_h, fit, *b->y, density);
+    free(url);
+    /* an icon link shows its name until its picture arrives */
+    if (index >= 0 && b->naming) t->entries[index].relayout = 1;
+    return index;
+}
+
 static void image(builder *b, int node, browser_style st, browser_box *box)
 {
     const dom_node *n = &b->dom->nodes[node];
     const char *alt = dom_attr(n, "alt");
-    int h, w = image_size(b, node, box, b->line->width, &h);
+    int h = 0, w = image_size(b, node, box, b->line->width, &h), picture = add_picture(b, node, box, w, h);
     if (w <= 0) return;
     int first = b->v->item_count;
     view_item it = item(ITEM_IMAGE, 0, 0, w, h, st.color);
     it.link = (short)b->link; it.control = (short)b->label;
+    it.flags = (short)(picture + 1);
     if (*alt) { it.text = store(b, alt, strlen(alt), 0); it.length = it.text >= 0 ? (int)strlen(alt) : 0; }
     if (add_item(b, it) < 0) return;
     b->v->images++;
@@ -1087,8 +1192,8 @@ static void element_styled(builder *b, int node, browser_style parent, browser_s
             int at = store_string(b, target);
             if (at >= 0) { b->v->links[b->v->link_count].url = at; b->link = b->v->link_count++; }
         }
-        /* An icon link (a logo, GitHub, Menu) shows its name. */
-        if (!has_content(dom, node, 0)) accessible_name(dom, node, icon, sizeof(icon));
+        /* An icon link (a logo, GitHub, Menu) shows its name, unless its picture shows. */
+        if (!has_content(dom, node, 0) && !has_picture(b, node, 0)) accessible_name(dom, node, icon, sizeof(icon));
     }
     if (is(n, "label")) {
         int target = find_id(dom, dom_attr(n, "for"));
@@ -1096,6 +1201,7 @@ static void element_styled(builder *b, int node, browser_style parent, browser_s
         if (c >= 0) b->label = c;
     }
     int inline_block = box.display == DISPLAY_INLINE_BLOCK && holds_blocks(b, node, st);
+    b->naming += *icon != 0;
     if (box.float_side && !item && !is(n, "body") && !is(n, "html")) {
         if (*icon) b->name = icon;
         float_box(b, node, parent, st, box);
@@ -1124,6 +1230,7 @@ static void element_styled(builder *b, int node, browser_style parent, browser_s
         add_gap(b, mr, parent.background, st);
         b->pad = pad;
     }
+    b->naming -= *icon != 0;
     b->link = link; b->label = label;
 }
 
@@ -1137,7 +1244,7 @@ typedef struct { int node, column, span; } cell;
 static float icon_width(builder *b, int node, browser_style st)
 {
     const dom_node *n = &b->dom->nodes[node];
-    if (!is(n, "a") || !*dom_attr(n, "href") || has_content(b->dom, node, 0)) return -1;
+    if (!is(n, "a") || !*dom_attr(n, "href") || has_content(b->dom, node, 0) || has_picture(b, node, 0)) return -1;
     char name[96] = "";
     accessible_name(b->dom, node, name, sizeof(name));
     browser_style ns = name_style(st);
@@ -1183,11 +1290,12 @@ static void content_widths(builder *b, int node, browser_style st, float *minimu
         if (block_level(n, cs, &box)) *line = 0;
         return;
     }
-    int h, fixed = -1;
-    if (is(n, "img")) fixed = image_size(b, node, &box, 0, &h);
+    int h, fixed = -1, compressible = 0;
+    if (is(n, "img")) { fixed = image_size(b, node, &box, 0, &h); compressible = box.width < 0 || box.max_width < 0; }
     else if (is(n, "input") || is(n, "select") || is(n, "button") || is(n, "textarea")) fixed = field_size(b, node, &box, 0, &h);
     if (fixed >= 0) {
-        if (fixed > *minimum) *minimum = (float)fixed;
+        /* a picture sized by a percentage shrinks with its container */
+        if (fixed > *minimum && !compressible) *minimum = (float)fixed;
         *line += (float)fixed;
         if (*line > *maximum) *maximum = *line;
         return;
@@ -1372,7 +1480,10 @@ static void measure_item(builder *b, flex_item *it, int width, int column)
     if (box->max_width) it->max = (float)resolve(box->max_width, width);
     float lo = 0, hi = 0;
     int h;
-    if (is(n, "img")) lo = hi = (float)image_size(b, it->node, box, 0, &h);
+    if (is(n, "img")) {
+        hi = (float)image_size(b, it->node, box, 0, &h);
+        lo = box->width < 0 || box->max_width < 0 ? 0 : hi;
+    }
     else if (is(n, "input") || is(n, "select") || is(n, "textarea") || is(n, "button")) lo = hi = (float)field_size(b, it->node, box, 0, &h);
     else if ((hi = icon_width(b, it->node, it->st)) >= 0) {
         lo = hi;
@@ -1499,8 +1610,18 @@ static void flex_rows(builder *b, flex_item *items, int n, browser_style st, con
         if (gaps < 0) gaps = 0;
         int count = end - start;
         flex_item *row = &items[start];
-        /* grow into the free space, or shrink to fit */
-        for (int i = 0; i < count; i++) { row[i].size = clampf(row[i].base, row[i].min, row[i].max); row[i].frozen = 0; }
+        /* grow into the free space, or shrink to fit, from the items' flex
+           base sizes: their sizes within min and max only decide which,
+           and hold the items that can't flex that way */
+        float hypothetical = (float)box->gap * gaps;
+        for (int i = 0; i < count; i++) hypothetical += clampf(row[i].base, row[i].min, row[i].max) + row[i].ml + row[i].mr;
+        int growing = hypothetical < (float)width;
+        for (int i = 0; i < count; i++) {
+            flex_item *it = &row[i];
+            float held = clampf(it->base, it->min, it->max);
+            it->frozen = growing ? it->grow <= 0 || it->base > held : it->shrink <= 0 || it->base < held;
+            it->size = it->frozen ? held : it->base;
+        }
         for (int pass = 0; pass < 4; pass++) {
             float free = (float)width - box->gap * gaps, weight = 0;
             for (int i = 0; i < count; i++) free -= row[i].size + row[i].ml + row[i].mr;
@@ -1515,6 +1636,7 @@ static void flex_rows(builder *b, flex_item *items, int n, browser_style st, con
                 it->size = size;
             }
         }
+        for (int i = 0; i < count; i++) row[i].size = clampf(row[i].size, row[i].min, row[i].max);
         /* never wider than the container: a long word breaks instead */
         for (int i = 0; i < count; i++) {
             float limit = (float)(width - row[i].ml - row[i].mr);

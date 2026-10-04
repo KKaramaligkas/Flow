@@ -1,4 +1,4 @@
 #ifndef FLOW_VERSION_H
 #define FLOW_VERSION_H
-#define APP_VERSION "0.3.2"
+#define APP_VERSION "0.4.0"
 #endif

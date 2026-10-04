@@ -1,5 +1,5 @@
 TARGET = flow
-OBJS = src/main.o src/adopt.o src/jobs.o src/url.o src/document.o src/dom.o src/css.o src/script.o src/layout.o src/session.o src/view.o \
+OBJS = src/main.o src/adopt.o src/jobs.o src/url.o src/document.o src/dom.o src/css.o src/script.o src/layout.o src/session.o src/view.o src/picture.o \
        vendor/quickjs/quickjs.o vendor/quickjs/cutils.o vendor/quickjs/dtoa.o vendor/quickjs/libregexp.o vendor/quickjs/libunicode.o \
        shared/net.o shared/http_policy.o shared/transfer.o shared/tlsdiag.o shared/clock.o shared/entropy.o \
        shared/stubs.o shared/resume.o shared/fs.o shared/util.o shared/gfx.o shared/text.o shared/input.o
@@ -10,7 +10,7 @@ ASFLAGS = $(CFLAGS)
 BUILD_PRX = 1
 PSP_FW_VERSION = 660
 # Leave sceUtility/RTC/net_inet/resolver to the SDK's libc dependencies, once.
-LIBS = -lintrafont -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lcjson -lz \
+LIBS = -lintrafont -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lcjson -lpng -ljpeg -lgif -lz \
        -lpspgu -lpspgum -lpsppower -lpspwlan -lpspnet -lpspnet_apctl -lm
 EXTRA_TARGETS = check-imports EBOOT.PBP
 PSP_EBOOT_TITLE = Flow

@@ -1,9 +1,9 @@
-# Flow 0.3
+# Flow 0.4
 
 A standalone PSP browser that lays pages out on the PSP itself, with CSS boxes,
-tables, form fields and a pointer you move with the analog stick. It runs
-JavaScript with QuickJS and fetches pages over verified TLS 1.2 HTTPS. No proxy
-or remote rendering service is involved.
+tables, form fields, pictures and a pointer you move with the analog stick. It
+runs JavaScript with QuickJS and fetches pages over verified TLS 1.2 HTTPS. No
+proxy or remote rendering service is involved.
 
 This repository is the browser's source. Until version 0.3.1 it was ARK
 Browser, part of [FasterARK powerup](https://github.com/KKaramaligkas/FasterARK_powerup);
@@ -34,12 +34,14 @@ manually; it is not available through the live store. The ARK updater does not
 install the browser automatically. This application does not flash firmware.
 
 The user reported that 0.1 works on PSP-3000 with CERN and CNN Lite. That report
-covers the original browser. This 0.3 build was tested in PPSSPP against local
-test pages (search, sign-in and article pages) and against saved copies of
-twelve real sites (pkg.go.dev, rubygems.org, nodejs.org, gitlab.com,
-hub.docker.com, jsr.io, packagist.org, nuget.org, bitbucket.org, ubuntu.com,
-apache.org and pypi.org), served with their stylesheets and scripts from a local
-HTTPS server. It still needs testing on a real PSP and over live connections.
+covers the original browser. This 0.4 build was tested in PPSSPP against local
+test pages (search, sign-in and article pages, and one with every kind of
+picture) and against saved copies of twelve real sites (pkg.go.dev,
+rubygems.org, nodejs.org, gitlab.com, hub.docker.com, jsr.io, packagist.org,
+nuget.org, bitbucket.org, ubuntu.com, apache.org and pypi.org), served with
+their stylesheets, scripts and, for apache.org, rubygems.org and packagist.org,
+their pictures from a local HTTPS server. It still needs testing on a real PSP
+and over live connections.
 Pages that JavaScript builds entirely, such as GitLab's, show little.
 
 ## Controls
@@ -102,14 +104,36 @@ few words are merged. `position` is ignored: positioned boxes are laid out in
 the normal flow, after a flex or grid container's items.
 
 Text hidden for screen readers, `display:none`, `visibility:hidden` and
-off-screen text are not shown. Images are not downloaded: they show as boxes
-with their description (`alt` text), at their size when the page gives it.
-Italic text is drawn upright, and CSS font families are not used. HTML 4's
-named characters (`&rsaquo;`, `&eacute;`, `&rarr;`...) and HTML 5's common ones
-are decoded; soft hyphens and zero-width characters are dropped. A link or
-button showing only an icon shows its name (`aria-label`, `title` or the
-picture's description) instead, and links that touch, as in menus spaced out by
-CSS, are kept a space apart.
+off-screen text are not shown. Italic text is drawn upright, and CSS font
+families are not used. HTML 4's named characters (`&rsaquo;`, `&eacute;`,
+`&rarr;`...) and HTML 5's common ones are decoded; soft hyphens and zero-width
+characters are dropped. A link or button showing only an icon shows its name
+(`aria-label`, `title` or the picture's description) instead, and a link's
+picture once it has arrived. Links that touch, as in menus spaced out by CSS,
+are kept a space apart.
+
+## Pictures
+
+JPEG, PNG and GIF pictures load after the page is shown, nearest to the screen
+first, and appear as they arrive. Each is decoded at the size it's shown at,
+never larger (a large JPEG at a half, a quarter or an eighth of its size), and
+kept in 16 bits a pixel, or 32 when it has transparent parts. `srcset` gives
+the smallest candidate wide enough for its box (or the 1x one), `<picture>` its
+first source in one of those formats whose `media` matches, and lazy-loading
+pages their `data-src` and `data-srcset`. A picture sized by the page shows in
+its box at once; one sized by itself shows its description until its size is
+known, and then the page is laid out again. The text you're reading stays where
+it is and what you typed into fields stays. GIFs show their first frame. WebP,
+AVIF and SVG pictures and CSS background images aren't shown; their description
+is. The status bar counts the pictures still to load.
+
+A page keeps up to 160 pictures, 4 MB of them decoded (12 MB on PSP-2000 and
+later), each from a download of at most 1.5 MB or a `data:` address of 32 KB.
+Past the budget a picture is decoded smaller, then not at all. A progressive
+JPEG is held whole while it decodes and isn't shown when that takes over 6 MB;
+a PNG over 4 megapixels isn't either, and every picture is decoded only with
+3 MB left over for the rest of the browser. Opening another page frees the
+current page's pictures first.
 
 ## Forms and cookies
 
@@ -247,18 +271,21 @@ and drawing code, ships its `cacert.pem` and runs its import check.
 
 `make package` builds `dist/Flow.zip`. It needs the
 [pspdev](https://github.com/pspdev/pspdev) toolchain and
-`psp-pacman -S curl mbedtls cjson libintrafont zlib`; CI uses the same pinned
+`psp-pacman -S curl mbedtls cjson libintrafont zlib jpeg libpng giflib`; CI uses the same pinned
 SDK inputs as FasterARK (`tools/toolchains.json`). QuickJS engine sources are
 vendored and built without OS helpers or atomics; see
 `vendor/quickjs/README.flow.md`.
 
-`make -C tests check` requires a native C compiler, cJSON and libcurl
-development packages, Python and OpenSSL. Address/undefined-behavior sanitizers
+`make -C tests check` requires a native C compiler, cJSON, libcurl, libjpeg,
+libpng and giflib development packages, Python and OpenSSL. Address/undefined-behavior sanitizers
 cover URL/HTML/history regressions, streaming boundaries and multi-MB scripts,
 CSS cascade, DOM mutations, modern syntax, promises, GET, module and resource
 failures, cancellation and infinite loops. The page view tests cover text flow
-and line breaking, boxes, lists, tables, form fields and submission, links,
-anchors and pointer movement. The transport fixtures verify TLS 1.2, invalid
+and line breaking, boxes, lists, tables, flex and grid layouts, floats, form
+fields and submission, links, anchors, pointer movement and pictures' boxes. The
+picture tests decode JPEGs, PNGs and GIFs the libraries make (and damaged
+copies of them), choose sources, and fill the page's table within its budget.
+The transport fixtures verify TLS 1.2, invalid
 certificates, downgrade rejection and redirect limits.
 
 Follow [the hardware checklist](https://github.com/KKaramaligkas/FasterARK_powerup/blob/main/docs/hardware-release-checklist.md) on a

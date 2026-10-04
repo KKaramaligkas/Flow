@@ -22,7 +22,7 @@ jobs:
       - name: Host test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcjson-dev libcurl4-openssl-dev libmbedtls-dev openssl
+          sudo apt-get install -y libcjson-dev libcurl4-openssl-dev libmbedtls-dev libjpeg-dev libpng-dev libgif-dev openssl
       - name: Sanitized tests
         env:
           UBSAN_OPTIONS: halt_on_error=1
@@ -63,7 +63,7 @@ jobs:
       - name: Libraries via psp-pacman
         run: |
           psp-pacman -Syy --noconfirm
-          psp-pacman -S --needed curl mbedtls cjson libintrafont zlib --noconfirm
+          psp-pacman -S --needed curl mbedtls cjson libintrafont zlib jpeg libpng giflib --noconfirm
       - name: Build
         run: make package
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

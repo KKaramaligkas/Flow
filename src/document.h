@@ -28,6 +28,7 @@ typedef struct {
     int scripting;              /* JavaScript is on: <noscript> is skipped */
     const browser_dom *rendered; /* the DOM the text and styles were last made from */
     struct browser_view *view;  /* the laid-out page, NULL until built */
+    struct picture_table *pictures; /* its pictures, when they're loaded (see picture.h) */
 } browser_document;
 int browser_document_parse(browser_document *doc, const char *data, size_t length,
                            const char *url, const char *content_type, char *err, size_t errlen);

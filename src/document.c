@@ -6,6 +6,7 @@
 #include "document.h"
 #include "script.h"
 #include "view.h"
+#include "picture.h"
 
 typedef struct { browser_document *doc; size_t used, capacity; int html, pre, latin; browser_style style; } writer;
 
@@ -272,6 +273,7 @@ void browser_script_free(browser_document *);
 void browser_document_free(browser_document *doc)
 {
     if(doc->view){browser_view_free(doc->view);free(doc->view);}
+    picture_table_free(doc->pictures);
     browser_script_free(doc);free(doc->text);free(doc->spans);css_free(&doc->css);
     if(doc->dom){dom_free(doc->dom);free(doc->dom);}memset(doc,0,sizeof(*doc));
 }

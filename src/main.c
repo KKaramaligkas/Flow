@@ -4,12 +4,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pspgu.h>
 #include <pspkernel.h>
 #include <psppower.h>
 #include <psputility.h>
 #include "adopt.h"
 #include "document.h"
 #include "layout.h"
+#include "picture.h"
 #include "view.h"
 #include "version.h"
 #include "session.h"
@@ -22,7 +24,7 @@
 #include "text.h"
 #include "util.h"
 
-PSP_MODULE_INFO("Flow",PSP_MODULE_USER,0,3);
+PSP_MODULE_INFO("Flow",PSP_MODULE_USER,0,4);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER|PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_THRESHOLD_SIZE_KB(4*1024);
 #define PAGE_LINES 16
@@ -190,6 +192,43 @@ static void draw_control(const browser_view *v,const view_item *it,int x,int y)
     clip_page(0,TOP,VIEW_WIDTH,PAGE_H);
 }
 
+/* A picture stretched to w x h, drawn in strips 32 pixels wide, which the
+   texture cache keeps up with. */
+typedef struct { float u,v,x,y,z; } picture_vertex;
+static void draw_picture(const picture_image *im,int x,int y,int w,int h)
+{
+    int tw=8,th=8;
+    while(tw<im->w) tw<<=1;
+    while(th<im->h) th<<=1;
+    sceGuEnable(GU_TEXTURE_2D);
+    sceGuTexMode(im->format==PIXELS_8888?GU_PSM_8888:GU_PSM_5650,0,0,0);
+    sceGuTexImage(0,tw,th,im->stride,im->pixels);
+    sceGuTexFunc(GU_TFX_REPLACE,GU_TCC_RGBA);
+    sceGuTexFilter(GU_LINEAR,GU_LINEAR);
+    sceGuTexWrap(GU_CLAMP,GU_CLAMP);
+    sceGuTexFlush();
+    for(int sx=0;sx<w;sx+=32) {
+        int sw=w-sx<32?w-sx:32;
+        picture_vertex *p=sceGuGetMemory(2*sizeof(*p));
+        p[0].u=(float)sx*im->w/w; p[0].v=0; p[0].x=(float)(x+sx); p[0].y=(float)y; p[0].z=0;
+        p[1].u=(float)(sx+sw)*im->w/w; p[1].v=(float)im->h; p[1].x=(float)(x+sx+sw); p[1].y=(float)(y+h); p[1].z=0;
+        sceGuDrawArray(GU_SPRITES,GU_TEXTURE_32BITF|GU_VERTEX_32BITF|GU_TRANSFORM_2D,2,0,p);
+    }
+    sceGuDisable(GU_TEXTURE_2D);
+}
+static const picture_entry *item_picture(const view_item *it)
+{
+    const picture_table *t=page->pictures;
+    return t&&it->flags>0&&it->flags<=t->count?&t->entries[it->flags-1]:NULL;
+}
+static int pictures_left(void)
+{
+    const picture_table *t=page?page->pictures:NULL;
+    int n=0;
+    for(int i=0;t&&i<t->count;i++) n+=t->entries[i].state==PICTURE_WAITING;
+    return n;
+}
+
 static void draw_item(const browser_view *v,const view_item *it,int top)
 {
     int x=it->x,y=it->y-top+TOP;
@@ -199,6 +238,13 @@ static void draw_item(const browser_view *v,const view_item *it,int top)
     case ITEM_BULLET: gfx_rect(x,y,it->w,it->h,it->color); break;
     case ITEM_CONTROL: if(it->control>=0) draw_control(v,it,x,y); break;
     case ITEM_IMAGE: {
+        const picture_entry *e=item_picture(it);
+        if(e&&e->state==PICTURE_READY) { draw_picture(&e->image,x,y,it->w,it->h); break; }
+        if(e&&!it->length) {
+            /* decoration: a faint box while it loads, nothing if it can't */
+            if(e->state==PICTURE_WAITING) gfx_rect(x,y,it->w,it->h,RGBA(120,128,140,36));
+            break;
+        }
         gfx_rect(x,y,it->w,it->h,RGB(232,234,237)); frame_rect(x,y,it->w,it->h,1,RGB(196,199,204));
         if(it->length>0&&it->h>=10) {
             char alt[256];int n=it->length<255?it->length:255;memcpy(alt,v->text+it->text,(size_t)n);alt[n]=0;
@@ -289,7 +335,9 @@ static void status_line(char *out,size_t size)
         return;
     }
     if(!reader&&link_list) { snprintf(out,size,"%d links. Confirm: open   Cancel: close",page->count); return; }
-    snprintf(out,size,"%s",page->title);
+    int left=browser_jobs_busy()?0:pictures_left();
+    if(left&&!reader) snprintf(out,size,"%s (%d picture%s to load)",page->title,left,left==1?"":"s");
+    else snprintf(out,size,"%s",page->title);
 }
 
 static void draw_scene(void *ud)
@@ -455,7 +503,9 @@ static void navigate(const char *url,int mode,const char *post)
     if(!connect_wifi() || exit_requested) return;
     message[0]=0; failed_url[0]=0;
     if(history.count) history.visits[history.current].scroll=(int)scroll_y;
-    if(browser_jobs_submit(BROWSER_JOB_PAGE,mode,target,NULL,javascript,post)<0) notice("Could not start loading the page.");
+    /* this page's pictures make room for the next page */
+    if(browser_pictures_stop(2000)==0) browser_pictures_release(page);
+    if(browser_jobs_submit(BROWSER_JOB_PAGE,mode,target,NULL,javascript,post)<0) { notice("Could not start loading the page."); browser_pictures(page); }
 }
 /* Words become a search; anything else is an address. */
 static void open_address(void)
@@ -512,15 +562,16 @@ static void home(void)
         "<li><a href='https://en.m.wikipedia.org/'>Wikipedia</a></li>"
         "<li><a href='https://lite.cnn.com/'>CNN Lite</a> and <a href='https://text.npr.org/'>NPR Text</a></li>"
         "<li><a href='http://info.cern.ch/'>The first website</a> (HTTP)</li></ul>"
-        "<p style='color:#606870'>Pages are laid out on your PSP with HTTPS, CSS and JavaScript. Images show as boxes with their description. "
-        "Cookies are kept in cookies.txt next to the app.</p>";
+        "<p style='color:#606870'>Pages are laid out on your PSP with HTTPS, CSS and JavaScript, and their JPEG, PNG and GIF pictures "
+        "load after the text, nearest first. Cookies are kept in cookies.txt next to the app.</p>";
     browser_document *next=calloc(1,sizeof(*next)); char err[256];
     if(!next) { notice("Not enough memory for the start page."); return; }
     if(browser_document_parse(next,html,strlen(html),"https://example.org/","text/html",err,sizeof(err))<0) { free(next); notice(err); return; }
     browser_build_view(next);
-    if(page) { browser_document_free(page); free(page); }
+    if(page) { browser_pictures_stop(-1); browser_pictures_forget(); browser_document_free(page); free(page); }
     page=next; memset(&history,0,sizeof(history)); scroll=0; scroll_y=scroll_target=0; selected=-1; link_list=0;
     message[0]=failed_url[0]=0; layout();
+    browser_pictures(page);
 }
 static void collect(void)
 {
@@ -528,7 +579,7 @@ static void collect(void)
     browser_document *loaded=browser_work.page;
     if(browser_work.result==0 && browser_work.type==BROWSER_JOB_PAGE && loaded) {
         if(browser_history_commit(&history,browser_work.navigation,loaded->url)==0) {
-            browser_document_free(page); free(page); page=loaded; browser_work.page=NULL;
+            browser_pictures_forget(); browser_document_free(page); free(page); page=loaded; browser_work.page=NULL;
             selected=-1; link_list=0; picker=-1; failed_url[0]=0; scroll=0; layout();
             scroll_y=scroll_target=0; scroll_to((float)history.visits[history.current].scroll); scroll_y=scroll_target;
             const char *fragment=strchr(page->url,'#');
@@ -549,6 +600,42 @@ static void collect(void)
     }
     if(browser_work.page) { browser_document_free(browser_work.page); free(browser_work.page); browser_work.page=NULL; }
     browser_work.finished=0;
+    browser_pictures(page);
+}
+static void update_hover(void);
+/* The page laid out again with its pictures' sizes: fields keep what was
+   typed, and the text at the top of the screen stays there. */
+static void take_view(void)
+{
+    browser_view *next=browser_pictures_view(page),*old=page->view;
+    if(!next) return;
+    float shift=0;
+    if(old) {
+        if(old->control_count==next->control_count)
+            for(int i=0;i<old->control_count;i++) {
+                view_control *a=&old->controls[i],*b=&next->controls[i];
+                if(a->kind!=b->kind) continue;
+                char *value=b->value; b->value=a->value; a->value=value;
+                b->checked=a->checked; b->selected=a->selected;
+            }
+        else picker=-1;
+        int top=(int)(scroll_y+0.5f),anchor=-1,best=-1;
+        for(int i=browser_view_first(old,top);browser_view_more(old,i,top+PAGE_H)&&anchor<0;i++)
+            if(old->items[i].kind==ITEM_TEXT&&old->items[i].y>=top) anchor=i;
+        for(int i=0;anchor>=0&&i<next->item_count;i++) {
+            const view_item *a=&old->items[anchor],*b=&next->items[i];
+            if(b->kind==ITEM_TEXT&&b->length==a->length&&!memcmp(next->text+b->text,old->text+a->text,(size_t)a->length)&&
+               (best<0||abs(i-anchor)<abs(best-anchor))) best=i;
+        }
+        if(best>=0) shift=(float)(next->items[best].y-old->items[anchor].y);
+        browser_view_free(old); free(old);
+    }
+    page->view=next;
+    scroll_y+=shift; scroll_to(scroll_target+shift);
+    float last=next->height>PAGE_H?(float)(next->height-PAGE_H):0;
+    if(scroll_y>last) scroll_y=last;
+    if(scroll_y<0) scroll_y=0;
+    update_hover();     /* its items are new */
 }
 static void back(void)
 {
@@ -759,8 +846,14 @@ int main(int argc,char **argv)
         input_state in;
         while(!exit_requested) {
             collect();
+            take_view();
+            browser_pictures_viewport((int)scroll_y,(int)scroll_y+PAGE_H);
 #ifdef PM_AUTOTEST
-            input_autotest_hold(browser_jobs_busy());
+#ifdef PM_AUTOTEST_EAGER
+            input_autotest_hold(browser_jobs_busy());   /* input while pictures load */
+#else
+            input_autotest_hold(browser_jobs_busy()||pictures_left());
+#endif
 #endif
             input_update(&in);
             if(browser_jobs_busy()) { if(in.pressed&BTN_CANCEL) browser_work.cancel=1; }
