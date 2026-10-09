@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - main
+    # a v<version> tag releases that version: Flow.zip, which the Plugin Manager's store installs
+    tags:
+      - 'v*'
   pull_request:
   workflow_dispatch:
 permissions:
@@ -70,3 +73,29 @@ jobs:
         with:
           name: Flow
           path: dist/Flow.zip
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: The tag is the app's version
+        run: |
+          version=$(sed -n 's/^#define APP_VERSION "\(.*\)"$/\1/p' src/version.h)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME, but src/version.h says $version"; exit 1; }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: Flow
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum Flow.zip > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Flow ${{ github.ref_name }}
+          make_latest: true
+          files: |
+            dist/Flow.zip
+            dist/SHA256SUMS
