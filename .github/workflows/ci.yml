@@ -3,9 +3,6 @@ on:
   push:
     branches:
       - main
-    # a v<version> tag releases that version: Flow.zip, which the Plugin Manager's store installs
-    tags:
-      - 'v*'
   pull_request:
   workflow_dispatch:
 permissions:
@@ -74,27 +71,42 @@ jobs:
           name: Flow
           path: dist/Flow.zip
   release:
+    # main releases the version in src/version.h, once, as v<version>: Flow.zip,
+    # which the Plugin Manager's store installs. Bump the version to release again.
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: The tag is the app's version
+      - name: Release name
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          version=$(sed -n 's/^#define APP_VERSION "\(.*\)"$/\1/p' src/version.h)
-          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME, but src/version.h says $version"; exit 1; }
+          tag="v$(sed -n 's/^#define APP_VERSION "\(.*\)"$/\1/p' src/version.h)"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --silent 2>/dev/null; then
+            echo "$tag is already released"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: steps.meta.outputs.publish == 'true'
         with:
           name: Flow
           path: dist
       - name: Checksums
+        if: steps.meta.outputs.publish == 'true'
         run: cd dist && sha256sum Flow.zip > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        if: steps.meta.outputs.publish == 'true'
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Flow ${{ github.ref_name }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Flow ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           make_latest: true
           files: |
             dist/Flow.zip
